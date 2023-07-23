@@ -9,7 +9,7 @@ wasmtime::component::bindgen!({
         "streams"::"stream-error": Error,
     },
     with: {
-       "wasi:filesystem/filesystem": crate::preview2::wasi::filesystem::filesystem,
+       "wasi:filesystem/types": crate::preview2::wasi::filesystem::types,
        "wasi:clocks/monotonic_clock": crate::preview2::wasi::clocks::monotonic_clock,
        "wasi:poll/poll": crate::preview2::wasi::poll::poll,
        "wasi:io/streams": crate::preview2::wasi::io::streams,
@@ -29,7 +29,7 @@ pub fn add_to_linker<T: WasiView>(l: &mut wasmtime::component::Linker<T>) -> any
     crate::preview2::wasi::clocks::wall_clock::add_to_linker(l, |t| t)?;
     crate::preview2::wasi::clocks::monotonic_clock::add_to_linker(l, |t| t)?;
     crate::preview2::wasi::clocks::timezone::add_to_linker(l, |t| t)?;
-    crate::preview2::wasi::filesystem::filesystem::add_to_linker(l, |t| t)?;
+    crate::preview2::wasi::filesystem::types::add_to_linker(l, |t| t)?;
     crate::preview2::wasi::poll::poll::add_to_linker(l, |t| t)?;
     crate::preview2::wasi::io::streams::add_to_linker(l, |t| t)?;
     crate::preview2::wasi::random::random::add_to_linker(l, |t| t)?;

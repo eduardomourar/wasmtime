@@ -3,7 +3,7 @@ use crate::preview2::wasi::cli_base::preopens;
 use crate::preview2::wasi::cli_base::stderr;
 use crate::preview2::wasi::cli_base::stdin;
 use crate::preview2::wasi::cli_base::stdout;
-use crate::preview2::wasi::filesystem::filesystem;
+use crate::preview2::wasi::filesystem::types as filesystem;
 use crate::preview2::wasi::io::streams;
 use crate::preview2::WasiView;
 

@@ -1,5 +1,5 @@
 use crate::bindings::wasi::cli_base::{stderr, stdin, stdout};
-use crate::bindings::wasi::filesystem::filesystem;
+use crate::bindings::wasi::filesystem::types as filesystem;
 use crate::bindings::wasi::io::streams::{self, InputStream, OutputStream};
 use crate::bindings::wasi::sockets::tcp;
 use crate::{set_stderr_stream, BumpArena, File, ImportAlloc, TrappingUnwrap, WasmStr};
@@ -69,7 +69,7 @@ impl Streams {
                 // For files, we may have adjusted the position for seeking, so
                 // create a new stream.
                 StreamType::File(file) => {
-                    let input = filesystem::read_via_stream(file.fd, file.position.get())?;
+                    let input = filesystem::read_via_stream(file.fd, file.position.get());
                     self.input.set(Some(input));
                     Ok(input)
                 }
@@ -93,9 +93,9 @@ impl Streams {
                 // create a new stream.
                 StreamType::File(file) => {
                     let output = if file.append {
-                        filesystem::append_via_stream(file.fd)?
+                        filesystem::append_via_stream(file.fd)
                     } else {
-                        filesystem::write_via_stream(file.fd, file.position.get())?
+                        filesystem::write_via_stream(file.fd, file.position.get())
                     };
                     self.output.set(Some(output));
                     Ok(output)

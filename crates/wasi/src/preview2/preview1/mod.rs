@@ -3,7 +3,7 @@ use crate::preview2::preview2::filesystem::TableReaddirExt;
 use crate::preview2::wasi::cli_base::{preopens, stderr, stdin, stdout};
 use crate::preview2::wasi::clocks::monotonic_clock;
 use crate::preview2::wasi::clocks::wall_clock;
-use crate::preview2::wasi::filesystem::filesystem;
+use crate::preview2::wasi::filesystem::types as filesystem;
 use crate::preview2::wasi::io::streams;
 use crate::preview2::{wasi, TableError, WasiView};
 use anyhow::{anyhow, bail, Context};
@@ -326,7 +326,7 @@ pub fn add_to_linker<
         + wasi::cli_base::environment::Host
         + wasi::cli_base::exit::Host
         + wasi::cli_base::preopens::Host
-        + wasi::filesystem::filesystem::Host
+        + wasi::filesystem::types::Host
         + wasi::poll::poll::Host
         + wasi::random::random::Host
         + wasi::io::streams::Host
@@ -626,7 +626,7 @@ impl<
             + wasi::cli_base::environment::Host
             + wasi::cli_base::exit::Host
             + wasi::cli_base::preopens::Host
-            + wasi::filesystem::filesystem::Host
+            + wasi::filesystem::types::Host
             + wasi::poll::poll::Host
             + wasi::random::random::Host
             + wasi::io::streams::Host

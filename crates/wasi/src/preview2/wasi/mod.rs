@@ -6,7 +6,7 @@ wasmtime::component::bindgen!({
       import wasi:clocks/wall-clock
       import wasi:clocks/monotonic-clock
       import wasi:clocks/timezone
-      import wasi:filesystem/filesystem
+      import wasi:filesystem/types
       import wasi:random/random
       import wasi:random/insecure
       import wasi:random/insecure-seed

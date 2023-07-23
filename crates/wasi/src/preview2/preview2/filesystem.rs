@@ -1,7 +1,7 @@
 use crate::preview2::filesystem::{Dir, File, TableFsExt};
 use crate::preview2::stream::TableStreamExt;
 use crate::preview2::wasi::clocks::wall_clock;
-use crate::preview2::wasi::filesystem::filesystem;
+use crate::preview2::wasi::filesystem::types as filesystem;
 use crate::preview2::wasi::io::streams;
 use crate::preview2::{DirPerms, FilePerms, Table, TableError, WasiView};
 

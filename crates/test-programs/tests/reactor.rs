@@ -5,7 +5,7 @@ use wasmtime::{
     Config, Engine, Store,
 };
 use wasmtime_wasi::preview2::wasi::clocks::wall_clock;
-use wasmtime_wasi::preview2::wasi::filesystem::filesystem;
+use wasmtime_wasi::preview2::wasi::filesystem::types as filesystem;
 use wasmtime_wasi::preview2::{self, Table, WasiCtx, WasiCtxBuilder, WasiView};
 
 lazy_static::lazy_static! {
@@ -29,7 +29,7 @@ wasmtime::component::bindgen!({
     async: true,
     with: {
        "wasi:io/streams": preview2::wasi::io::streams,
-       "wasi:filesystem/filesystem": preview2::wasi::filesystem::filesystem,
+       "wasi:filesystem/types": preview2::wasi::filesystem::types,
        "wasi:cli-base/environment": preview2::wasi::cli_base::environment,
        "wasi:cli-base/preopens": preview2::wasi::cli_base::preopens,
        "wasi:cli-base/exit": preview2::wasi::cli_base::exit,
@@ -69,7 +69,7 @@ async fn instantiate(
     let mut linker = Linker::new(&ENGINE);
 
     // All of the imports available to the world are provided by the wasi-common crate:
-    preview2::wasi::filesystem::filesystem::add_to_linker(&mut linker, |x| x)?;
+    preview2::wasi::filesystem::types::add_to_linker(&mut linker, |x| x)?;
     preview2::wasi::io::streams::add_to_linker(&mut linker, |x| x)?;
     preview2::wasi::cli_base::environment::add_to_linker(&mut linker, |x| x)?;
     preview2::wasi::cli_base::preopens::add_to_linker(&mut linker, |x| x)?;
