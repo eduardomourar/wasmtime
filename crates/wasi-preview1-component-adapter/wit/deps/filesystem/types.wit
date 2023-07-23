@@ -1,5 +1,3 @@
-package wasi:filesystem
-
 /// WASI filesystem is a filesystem API primarily intended to let users run WASI
 /// programs that access their files on their existing filesystems, without
 /// significant overhead.
@@ -19,7 +17,7 @@ package wasi:filesystem
 /// `..` and symbolic link steps, reaches a directory outside of the base
 /// directory, or reaches a symlink to an absolute or rooted path in the
 /// underlying filesystem, the function fails with `error-code::not-permitted`.
-interface filesystem {
+interface types {
     use wasi:io/streams.{input-stream, output-stream}
     use wasi:clocks/wall-clock.{datetime}
 
@@ -57,6 +55,14 @@ interface filesystem {
         read,
         /// Write mode: Data can be written to.
         write,
+        /// Requests non-blocking operation.
+        ///
+        /// When this flag is enabled, functions may return immediately with an
+        /// `error-code::would-block` error code in situations where they would
+        /// otherwise block. However, this non-blocking behavior is not
+        /// required. Implementations are permitted to ignore this flag and
+        /// block. This is similar to `O_NONBLOCK` in POSIX.
+        non-blocking,
         /// Request that writes be performed according to synchronized I/O file
         /// integrity completion. The data stored in the file and the file's
         /// metadata are synchronized. This is similar to `O_SYNC` in POSIX.
@@ -311,30 +317,30 @@ interface filesystem {
     /// Multiple read, write, and append streams may be active on the same open
     /// file and they do not interfere with each other.
     ///
-    /// Note: This allows using `wasi:io/streams.read`, which is similar to `read` in POSIX.
+    /// Note: This allows using `read-stream`, which is similar to `read` in POSIX.
     read-via-stream: func(
         this: descriptor,
         /// The offset within the file at which to start reading.
         offset: filesize,
-    ) -> result<input-stream, error-code>
+    ) -> input-stream
 
     /// Return a stream for writing to a file.
     ///
-    /// Note: This allows using `wasi:io/streams.write`, which is similar to `write` in
+    /// Note: This allows using `write-stream`, which is similar to `write` in
     /// POSIX.
     write-via-stream: func(
         this: descriptor,
         /// The offset within the file at which to start writing.
         offset: filesize,
-    ) -> result<output-stream, error-code>
+    ) -> output-stream
 
     /// Return a stream for appending to a file.
     ///
-    /// Note: This allows using `wasi:io/streams.write`, which is similar to `write` with
+    /// Note: This allows using `write-stream`, which is similar to `write` with
     /// `O_APPEND` in in POSIX.
     append-via-stream: func(
         this: descriptor,
-    ) -> result<output-stream, error-code>
+    ) -> output-stream
 
     /// Provide file advisory information on a descriptor.
     ///
@@ -376,6 +382,15 @@ interface filesystem {
     /// Note: This returns the value that was the `fs_filetype` value returned
     /// from `fdstat_get` in earlier versions of WASI.
     get-type: func(this: descriptor) -> result<descriptor-type, error-code>
+
+    /// Set status flags associated with a descriptor.
+    ///
+    /// This function may only change the `non-blocking` flag.
+    ///
+    /// Note: This is similar to `fcntl(fd, F_SETFL, flags)` in POSIX.
+    ///
+    /// Note: This was called `fd_fdstat_set_flags` in earlier versions of WASI.
+    set-flags: func(this: descriptor, %flags: descriptor-flags) -> result<_, error-code>
 
     /// Adjust the size of an open file. If this increases the file's size, the
     /// extra bytes are filled with zeros.

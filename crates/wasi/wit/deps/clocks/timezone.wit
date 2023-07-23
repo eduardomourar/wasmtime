@@ -1,5 +1,3 @@
-package wasi:clocks
-
 interface timezone {
     use wall-clock.{datetime}
 

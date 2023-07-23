@@ -4,7 +4,7 @@ world command-extended {
   import wasi:clocks/wall-clock
   import wasi:clocks/monotonic-clock
   import wasi:clocks/timezone
-  import wasi:filesystem/filesystem
+  import wasi:filesystem/types
   import wasi:sockets/instance-network
   import wasi:sockets/ip-name-lookup
   import wasi:sockets/network
@@ -27,7 +27,7 @@ world command-extended {
   // We should replace all others with `include self.command`
   // as soon as the unioning of worlds is available:
   // https://github.com/WebAssembly/component-model/issues/169
-  import wasi:logging/handler
+  import wasi:logging/logging
   import wasi:http/outgoing-handler
 
   export run: func(
