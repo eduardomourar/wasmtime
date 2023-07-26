@@ -112,7 +112,7 @@ impl WasiHttp {
             request_id_base: 1,
             response_id_base: 1,
             fields_id_base: 1,
-            streams_id_base: 1,
+            streams_id_base: 3, // 0, 1 and 2 are reserved for stdio
             future_id_base: 1,
             requests: HashMap::new(),
             responses: HashMap::new(),
