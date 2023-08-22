@@ -91,6 +91,11 @@ fn parse_profile(s: &str) -> Result<Profile> {
     }
 }
 
+fn run_future<F: futures::Future>(future: F) -> F::Output {
+    let mut f = Box::pin(future);
+    futures::executor::block_on(f.as_mut())
+}
+
 static AFTER_HELP: Lazy<String> = Lazy::new(|| crate::FLAG_EXPLANATIONS.to_string());
 
 /// Runs a WebAssembly module
@@ -254,6 +259,10 @@ pub struct RunCommand {
     /// removed. For now this is primarily here for testing.
     #[clap(long)]
     preview2: bool,
+
+    /// Indicates that the async support will be enabled
+    #[clap(long = "async")]
+    async_support: bool,
 }
 
 #[derive(Clone)]
@@ -311,6 +320,9 @@ impl RunCommand {
                 config.epoch_interruption(true);
             }
             None => {}
+        }
+        if self.async_support {
+            config.async_support(true);
         }
 
         config.wmemcheck(self.wmemcheck);
@@ -597,7 +609,12 @@ impl RunCommand {
             CliLinker::Core(linker) => {
                 // Use "" as a default module name.
                 let module = module.unwrap_core();
-                linker.module(&mut *store, "", &module).context(format!(
+                if self.async_support {
+                    run_future(linker.module_async(&mut *store, "", &module))
+                } else {
+                    linker.module(&mut *store, "", &module)
+                }
+                .context(format!(
                     "failed to instantiate {:?}",
                     self.module_and_args[0]
                 ))?;
@@ -689,7 +706,12 @@ impl RunCommand {
         // Invoke the function and then afterwards print all the results that came
         // out, if there are any.
         let mut results = vec![Val::null(); ty.results().len()];
-        let invoke_res = func.call(store, &values, &mut results).with_context(|| {
+        let invoke_res = if self.async_support {
+            run_future(func.call_async(store, &values, &mut results))
+        } else {
+            func.call(store, &values, &mut results)
+        }
+        .with_context(|| {
             if let Some(name) = &self.invoke {
                 format!("failed to invoke `{}`", name)
             } else {
@@ -875,7 +897,11 @@ impl RunCommand {
             match linker {
                 CliLinker::Core(linker) => {
                     if self.preview2 {
-                        wasmtime_wasi::preview2::preview1::add_to_linker_sync(linker)?;
+                        if self.async_support {
+                            wasmtime_wasi::preview2::preview1::add_to_linker_async(linker)?;
+                        } else {
+                            wasmtime_wasi::preview2::preview1::add_to_linker_sync(linker)?;
+                        }
                         self.set_preview2_ctx(store)?;
                     } else {
                         wasmtime_wasi::add_to_linker(linker, |host| {
@@ -886,7 +912,11 @@ impl RunCommand {
                 }
                 #[cfg(feature = "component-model")]
                 CliLinker::Component(linker) => {
-                    wasmtime_wasi::preview2::command::sync::add_to_linker(linker)?;
+                    if self.async_support {
+                        wasmtime_wasi::preview2::command::add_to_linker(linker)?;
+                    } else {
+                        wasmtime_wasi::preview2::command::sync::add_to_linker(linker)?;
+                    }
                     self.set_preview2_ctx(store)?;
                 }
             }
