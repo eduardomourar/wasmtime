@@ -79,8 +79,12 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(src2);
         }
 
-        Inst::GetSp { dst } => {
+        Inst::GetSpecial { dst, reg } => {
             collector.reg_def(dst);
+            // Note that this is explicitly ignored as this is only used for
+            // special registers that don't participate in register allocation
+            // such as the stack pointer, frame pointer, etc.
+            assert!(reg.is_special());
         }
 
         Inst::LoadExtName {
@@ -91,7 +95,7 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_def(dst);
         }
 
-        Inst::Call { info } => {
+        Inst::Call { info } | Inst::IndirectCallHost { info } => {
             let CallInfo { uses, defs, .. } = &mut **info;
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
@@ -244,6 +248,25 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(src);
             collector.reg_def(dst);
         }
+
+        Inst::BrTable { idx, .. } => {
+            collector.reg_use(idx);
+        }
+
+        Inst::StackAlloc32 { .. } | Inst::StackFree32 { .. } | Inst::PushFrame | Inst::PopFrame => {
+        }
+
+        Inst::Zext8 { dst, src }
+        | Inst::Zext16 { dst, src }
+        | Inst::Zext32 { dst, src }
+        | Inst::Sext8 { dst, src }
+        | Inst::Sext16 { dst, src }
+        | Inst::Sext32 { dst, src }
+        | Inst::Bswap32 { dst, src }
+        | Inst::Bswap64 { dst, src } => {
+            collector.reg_use(src);
+            collector.reg_def(dst);
+        }
     }
 }
 
@@ -309,7 +332,7 @@ where
     type LabelUse = LabelUse;
     type ABIMachineSpec = PulleyMachineDeps<P>;
 
-    const TRAP_OPCODE: &'static [u8] = &[0];
+    const TRAP_OPCODE: &'static [u8] = TRAP_OPCODE;
 
     fn gen_dummy_use(_reg: Reg) -> Self {
         todo!()
@@ -370,6 +393,7 @@ where
             | Inst::BrIfXslteq32 { .. }
             | Inst::BrIfXult32 { .. }
             | Inst::BrIfXulteq32 { .. } => MachTerminator::Cond,
+            Inst::BrTable { .. } => MachTerminator::Indirect,
             _ => MachTerminator::None,
         }
     }
@@ -437,8 +461,8 @@ where
         }
     }
 
-    fn gen_jump(_target: MachLabel) -> Self {
-        todo!()
+    fn gen_jump(label: MachLabel) -> Self {
+        Inst::Jump { label }.into()
     }
 
     fn worst_case_size() -> CodeOffset {
@@ -466,6 +490,19 @@ where
             preferred: 1,
         }
     }
+}
+
+const TRAP_OPCODE: &'static [u8] = &[
+    pulley_interpreter::opcode::Opcode::ExtendedOp as u8,
+    ((pulley_interpreter::opcode::ExtendedOpcode::Trap as u16) >> 0) as u8,
+    ((pulley_interpreter::opcode::ExtendedOpcode::Trap as u16) >> 8) as u8,
+];
+
+#[test]
+fn test_trap_encoding() {
+    let mut dst = std::vec::Vec::new();
+    pulley_interpreter::encode::trap(&mut dst);
+    assert_eq!(dst, TRAP_OPCODE);
 }
 
 //=============================================================================
@@ -550,9 +587,10 @@ impl Inst {
 
             Inst::Ret => format!("ret"),
 
-            Inst::GetSp { dst } => {
+            Inst::GetSpecial { dst, reg } => {
                 let dst = format_reg(*dst.to_reg());
-                format!("{dst} = get_sp")
+                let reg = format_reg(**reg);
+                format!("xmov {dst}, {reg}")
             }
 
             Inst::LoadExtName { dst, name, offset } => {
@@ -567,6 +605,10 @@ impl Inst {
             Inst::IndirectCall { info } => {
                 let callee = format_reg(*info.dest);
                 format!("indirect_call {callee}, {info:?}")
+            }
+
+            Inst::IndirectCallHost { info } => {
+                format!("indirect_call_host {info:?}")
             }
 
             Inst::Jump { label } => format!("jump {}", label.to_string()),
@@ -825,6 +867,65 @@ impl Inst {
                 let dst = format_reg(*dst.to_reg());
                 let src = format_reg(**src);
                 format!("{dst} = bitcast_float_from_int64 {src}")
+            }
+
+            Inst::BrTable {
+                idx,
+                default,
+                targets,
+            } => {
+                let idx = format_reg(**idx);
+                format!("br_table {idx} {default:?} {targets:?}")
+            }
+
+            Inst::StackAlloc32 { amt } => {
+                format!("stack_alloc32 {amt:#x}")
+            }
+            Inst::StackFree32 { amt } => {
+                format!("stack_free32 {amt:#x}")
+            }
+            Inst::PushFrame => format!("push_frame"),
+            Inst::PopFrame => format!("pop_frame"),
+
+            Inst::Zext8 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("zext8 {dst}, {src}")
+            }
+            Inst::Zext16 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("zext16 {dst}, {src}")
+            }
+            Inst::Zext32 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("zext32 {dst}, {src}")
+            }
+            Inst::Sext8 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("sext8 {dst}, {src}")
+            }
+            Inst::Sext16 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("sext16 {dst}, {src}")
+            }
+            Inst::Sext32 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("sext32 {dst}, {src}")
+            }
+            Inst::Bswap32 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("bswap32 {dst}, {src}")
+            }
+            Inst::Bswap64 { dst, src } => {
+                let dst = format_reg(*dst.to_reg());
+                let src = format_reg(**src);
+                format!("bswap64 {dst}, {src}")
             }
         }
     }

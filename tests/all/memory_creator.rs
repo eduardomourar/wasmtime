@@ -5,7 +5,6 @@ mod not_for_windows {
 
     use rustix::mm::{mmap_anonymous, mprotect, munmap, MapFlags, MprotectFlags, ProtFlags};
 
-    use std::ops::Range;
     use std::ptr::null_mut;
     use std::sync::{Arc, Mutex};
 
@@ -57,8 +56,8 @@ mod not_for_windows {
             self.used_wasm_bytes
         }
 
-        fn maximum_byte_size(&self) -> Option<usize> {
-            Some(self.size - self.guard_size)
+        fn byte_capacity(&self) -> usize {
+            self.size - self.guard_size
         }
 
         fn grow_to(&mut self, new_size: usize) -> wasmtime::Result<()> {
@@ -77,12 +76,6 @@ mod not_for_windows {
 
         fn as_ptr(&self) -> *mut u8 {
             self.mem as *mut u8
-        }
-
-        fn wasm_accessible(&self) -> Range<usize> {
-            let base = self.mem;
-            let end = base + self.size;
-            base..end
         }
     }
 
@@ -110,7 +103,7 @@ mod not_for_windows {
             guard_size: usize,
         ) -> Result<Box<dyn LinearMemory>, String> {
             assert_eq!(guard_size, 0);
-            assert!(reserved_size.is_none());
+            assert_eq!(reserved_size, Some(0));
             assert!(!ty.is_64());
             unsafe {
                 let mem = Box::new(CustomMemory::new(
@@ -129,8 +122,8 @@ mod not_for_windows {
         let mut config = Config::new();
         config
             .with_host_memory(mem_creator.clone())
-            .static_memory_maximum_size(0)
-            .dynamic_memory_guard_size(0);
+            .memory_reservation(0)
+            .memory_guard_size(0);
         (Store::new(&Engine::new(&config).unwrap(), ()), mem_creator)
     }
 

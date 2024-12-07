@@ -1,3 +1,6 @@
+;;! custom_page_sizes = true
+;;! multi_memory = true
+
 ;; Check all the valid custom page sizes.
 (module (memory 1 (pagesize 1)))
 (module (memory 1 (pagesize 65536)))
@@ -106,3 +109,13 @@
 (module
   (memory (import "m" "large-pages-memory") 0 (pagesize 65536))
 )
+
+(module
+  (memory 8 8 (pagesize 0x1))
+  (func (export "load64") (param i32) (result i64)
+    local.get 0
+    i64.load
+  )
+)
+
+(assert_return (invoke "load64" (i32.const 0)) (i64.const 0))

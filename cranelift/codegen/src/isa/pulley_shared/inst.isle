@@ -21,6 +21,13 @@
     ;; A pseudo-instruction to update unwind info.
     (Unwind (inst UnwindInst))
 
+    ;; Implementation of `br_table`, uses `idx` to jump to one of `targets` or
+    ;; jumps to `default` if it's out-of-bounds.
+    (BrTable
+      (idx XReg)
+      (default MachLabel)
+      (targets BoxVecMachLabel))
+
     ;;;; Actual Instructions ;;;;
 
     ;; Raise a trap.
@@ -32,8 +39,11 @@
     ;; Nothing.
     (Nop)
 
-    ;; Get the stack pointer.
-    (GetSp (dst WritableXReg))
+    ;; Move a special register (e.g. sp, fp, lr, etc) in to a general-purpose
+    ;; register.
+    (GetSpecial
+      (dst WritableXReg)
+      (reg XReg))
 
     ;; Return.
     (Ret)
@@ -48,6 +58,10 @@
 
     ;; An indirect call to an unknown callee.
     (IndirectCall (info BoxCallIndInfo))
+
+    ;; An indirect call out to a host-defined function. The host function
+    ;; pointer is the first "argument" of this function call.
+    (IndirectCallHost (info BoxCallInfo))
 
     ;; Unconditional jumps.
     (Jump (label MachLabel))
@@ -106,6 +120,24 @@
     (BitcastIntFromFloat64 (dst WritableXReg) (src FReg))
     (BitcastFloatFromInt32 (dst WritableFReg) (src XReg))
     (BitcastFloatFromInt64 (dst WritableFReg) (src XReg))
+
+    ;; Stack manipulations
+    (PushFrame)
+    (PopFrame)
+    (StackAlloc32 (amt u32))
+    (StackFree32 (amt u32))
+
+    ;; Sign extensions.
+    (Zext8 (dst WritableXReg) (src XReg))
+    (Zext16 (dst WritableXReg) (src XReg))
+    (Zext32 (dst WritableXReg) (src XReg))
+    (Sext8 (dst WritableXReg) (src XReg))
+    (Sext16 (dst WritableXReg) (src XReg))
+    (Sext32 (dst WritableXReg) (src XReg))
+
+    ;; Byte swaps.
+    (Bswap32 (dst WritableXReg) (src XReg))
+    (Bswap64 (dst WritableXReg) (src XReg))
   )
 )
 
@@ -367,11 +399,20 @@
 (rule (pulley_trap_if cond size src1 src2 code)
       (SideEffectNoResult.Inst (MInst.TrapIf cond size src1 src2 code)))
 
-(decl pulley_get_sp () XReg)
-(rule (pulley_get_sp)
-      (let ((reg WritableXReg (temp_writable_xreg))
-            (_ Unit (emit (MInst.GetSp reg))))
-        reg))
+(decl sp_reg () XReg)
+(extern constructor sp_reg sp_reg)
+
+(decl fp_reg () XReg)
+(extern constructor fp_reg fp_reg)
+
+(decl lr_reg () XReg)
+(extern constructor lr_reg lr_reg)
+
+(decl pulley_get_special (XReg) XReg)
+(rule (pulley_get_special reg)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.GetSpecial dst reg))))
+        dst))
 
 (decl pulley_xconst8 (i8) XReg)
 (rule (pulley_xconst8 x)
@@ -545,6 +586,58 @@
 (rule (pulley_bitcast_int_from_float_64 src)
       (let ((dst WritableXReg (temp_writable_xreg))
             (_ Unit (emit (MInst.BitcastIntFromFloat64 dst src))))
+        dst))
+
+(decl gen_br_table (XReg MachLabel BoxVecMachLabel) Unit)
+(rule (gen_br_table idx default labels)
+      (emit (MInst.BrTable idx default labels)))
+
+(decl pulley_zext8 (XReg) XReg)
+(rule (pulley_zext8 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Zext8 dst src))))
+        dst))
+
+(decl pulley_zext16 (XReg) XReg)
+(rule (pulley_zext16 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Zext16 dst src))))
+        dst))
+
+(decl pulley_zext32 (XReg) XReg)
+(rule (pulley_zext32 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Zext32 dst src))))
+        dst))
+
+(decl pulley_sext8 (XReg) XReg)
+(rule (pulley_sext8 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Sext8 dst src))))
+        dst))
+
+(decl pulley_sext16 (XReg) XReg)
+(rule (pulley_sext16 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Sext16 dst src))))
+        dst))
+
+(decl pulley_sext32 (XReg) XReg)
+(rule (pulley_sext32 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Sext32 dst src))))
+        dst))
+
+(decl pulley_bswap32 (XReg) XReg)
+(rule (pulley_bswap32 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Bswap32 dst src))))
+        dst))
+
+(decl pulley_bswap64 (XReg) XReg)
+(rule (pulley_bswap64 src)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.Bswap64 dst src))))
         dst))
 
 ;;;; Helpers for Emitting Calls ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

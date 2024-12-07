@@ -1,14 +1,14 @@
 use crate::prelude::*;
 use crate::runtime::vm::{
-    ExportFunction, SendSyncPtr, StoreBox, VMArrayCallHostFuncContext, VMContext, VMFuncRef,
-    VMFunctionImport, VMOpaqueContext,
+    ExportFunction, InterpreterRef, SendSyncPtr, StoreBox, VMArrayCallHostFuncContext, VMContext,
+    VMFuncRef, VMFunctionImport, VMOpaqueContext,
 };
 use crate::runtime::Uninhabited;
 use crate::store::{AutoAssertNoGc, StoreData, StoreOpaque, Stored};
 use crate::type_registry::RegisteredType;
 use crate::{
-    AsContext, AsContextMut, CallHook, Engine, Extern, FuncType, Instance, Module, Ref,
-    StoreContext, StoreContextMut, Val, ValRaw, ValType,
+    AsContext, AsContextMut, CallHook, Engine, Extern, FuncType, Instance, Module, ModuleExport,
+    Ref, StoreContext, StoreContextMut, Val, ValRaw, ValType,
 };
 use alloc::sync::Arc;
 use core::ffi::c_void;
@@ -16,7 +16,7 @@ use core::future::Future;
 use core::mem::{self, MaybeUninit};
 use core::num::NonZeroUsize;
 use core::pin::Pin;
-use core::ptr::{self, NonNull};
+use core::ptr::NonNull;
 use wasmtime_environ::VMSharedTypeIndex;
 
 /// A reference to the abstract `nofunc` heap value.
@@ -573,12 +573,11 @@ impl Func {
 
     pub(crate) unsafe fn from_vm_func_ref(
         store: &mut StoreOpaque,
-        raw: *mut VMFuncRef,
-    ) -> Option<Func> {
-        let func_ref = NonNull::new(raw)?;
+        func_ref: NonNull<VMFuncRef>,
+    ) -> Func {
         debug_assert!(func_ref.as_ref().type_index != VMSharedTypeIndex::default());
         let export = ExportFunction { func_ref };
-        Some(Func::from_wasmtime_function(export, store))
+        Func::from_wasmtime_function(export, store)
     }
 
     /// Creates a new `Func` from the given Rust closure.
@@ -1056,33 +1055,24 @@ impl Func {
     pub unsafe fn call_unchecked(
         &self,
         mut store: impl AsContextMut,
-        params_and_returns: *mut ValRaw,
-        params_and_returns_capacity: usize,
+        params_and_returns: *mut [ValRaw],
     ) -> Result<()> {
         let mut store = store.as_context_mut();
         let data = &store.0.store_data()[self.0];
         let func_ref = data.export().func_ref;
-        Self::call_unchecked_raw(
-            &mut store,
-            func_ref,
-            params_and_returns,
-            params_and_returns_capacity,
-        )
+        Self::call_unchecked_raw(&mut store, func_ref, params_and_returns)
     }
 
     pub(crate) unsafe fn call_unchecked_raw<T>(
         store: &mut StoreContextMut<'_, T>,
         func_ref: NonNull<VMFuncRef>,
-        params_and_returns: *mut ValRaw,
-        params_and_returns_capacity: usize,
+        params_and_returns: *mut [ValRaw],
     ) -> Result<()> {
-        invoke_wasm_and_catch_traps(store, |caller| {
-            let func_ref = func_ref.as_ref();
-            (func_ref.array_call)(
-                func_ref.vmctx,
-                caller.cast::<VMOpaqueContext>(),
+        invoke_wasm_and_catch_traps(store, |caller, vm| {
+            func_ref.as_ref().array_call(
+                vm,
+                VMOpaqueContext::from_vmcontext(caller),
                 params_and_returns,
-                params_and_returns_capacity,
             )
         })
     }
@@ -1102,7 +1092,7 @@ impl Func {
     }
 
     pub(crate) unsafe fn _from_raw(store: &mut StoreOpaque, raw: *mut c_void) -> Option<Func> {
-        Func::from_vm_func_ref(store, raw.cast())
+        Some(Func::from_vm_func_ref(store, NonNull::new(raw.cast())?))
     }
 
     /// Extracts the raw value of this `Func`, which is owned by `store`.
@@ -1256,7 +1246,10 @@ impl Func {
         }
 
         unsafe {
-            self.call_unchecked(&mut *store, values_vec.as_mut_ptr(), values_vec_size)?;
+            self.call_unchecked(
+                &mut *store,
+                core::ptr::slice_from_raw_parts_mut(values_vec.as_mut_ptr(), values_vec_size),
+            )?;
         }
 
         for ((i, slot), val) in results.iter_mut().enumerate().zip(&values_vec) {
@@ -1601,7 +1594,7 @@ impl Func {
 /// can pass to the called wasm function, if desired.
 pub(crate) fn invoke_wasm_and_catch_traps<T>(
     store: &mut StoreContextMut<'_, T>,
-    closure: impl FnMut(*mut VMContext),
+    closure: impl FnMut(*mut VMContext, Option<InterpreterRef<'_>>) -> bool,
 ) -> Result<()> {
     unsafe {
         let exit = enter_wasm(store);
@@ -1610,14 +1603,7 @@ pub(crate) fn invoke_wasm_and_catch_traps<T>(
             exit_wasm(store, exit);
             return Err(trap);
         }
-        let result = crate::runtime::vm::catch_traps(
-            store.0.signal_handler(),
-            store.0.engine().config().wasm_backtrace,
-            store.0.engine().config().coredump_on_trap,
-            store.0.async_guard_range(),
-            store.0.default_caller(),
-            closure,
-        );
+        let result = crate::runtime::vm::catch_traps(store, closure);
         exit_wasm(store, exit);
         store.0.call_hook(CallHook::ReturningFromWasm)?;
         result.map_err(|t| crate::trap::from_runtime_box(store.0, t))
@@ -2049,18 +2035,22 @@ impl<T> Caller<'_, T> {
         R: 'static,
     {
         debug_assert!(!caller.is_null());
-        crate::runtime::vm::Instance::from_vmctx(caller, |instance| {
-            let store = StoreContextMut::from_raw(instance.store());
-            let gc_lifo_scope = store.0.gc_roots().enter_lifo_scope();
+        crate::runtime::vm::InstanceAndStore::from_vmctx(caller, |pair| {
+            let (instance, mut store) = pair.unpack_context_mut::<T>();
 
-            let ret = f(Caller {
-                store,
-                caller: &instance,
-            });
+            let (gc_lifo_scope, ret) = {
+                let gc_lifo_scope = store.0.gc_roots().enter_lifo_scope();
+
+                let ret = f(Caller {
+                    store: store.as_context_mut(),
+                    caller: &instance,
+                });
+
+                (gc_lifo_scope, ret)
+            };
 
             // Safe to recreate a mutable borrow of the store because `ret`
             // cannot be borrowing from the store.
-            let store = StoreContextMut::<T>::from_raw(instance.store());
             store.0.exit_gc_lifo_scope(gc_lifo_scope);
 
             ret
@@ -2107,6 +2097,78 @@ impl<T> Caller<'_, T> {
             .host_state()
             .downcast_ref::<Instance>()?
             .get_export(&mut self.store, name)
+    }
+
+    /// Looks up an exported [`Extern`] value by a [`ModuleExport`] value.
+    ///
+    /// This is similar to [`Self::get_export`] but uses a [`ModuleExport`] value to avoid
+    /// string lookups where possible. [`ModuleExport`]s can be obtained by calling
+    /// [`Module::get_export_index`] on the [`Module`] that an instance was instantiated with.
+    ///
+    /// This method will search the module for an export with a matching entity index and return
+    /// the value, if found.
+    ///
+    /// Returns `None` if there was no export with a matching entity index.
+    /// # Panics
+    ///
+    /// Panics if `store` does not own this instance.
+    ///
+    /// # Usage
+    /// ```
+    /// use std::str;
+    ///
+    /// # use wasmtime::*;
+    /// # fn main() -> anyhow::Result<()> {
+    /// # let mut store = Store::default();
+    ///
+    /// let module = Module::new(
+    ///     store.engine(),
+    ///     r#"
+    ///         (module
+    ///             (import "" "" (func $log_str (param i32 i32)))
+    ///             (func (export "foo")
+    ///                 i32.const 4   ;; ptr
+    ///                 i32.const 13  ;; len
+    ///                 call $log_str)
+    ///             (memory (export "memory") 1)
+    ///             (data (i32.const 4) "Hello, world!"))
+    ///     "#,
+    /// )?;
+    ///
+    /// let Some(module_export) = module.get_export_index("memory") else {
+    ///    anyhow::bail!("failed to find `memory` export in module");
+    /// };
+    ///
+    /// let log_str = Func::wrap(&mut store, move |mut caller: Caller<'_, ()>, ptr: i32, len: i32| {
+    ///     let mem = match caller.get_module_export(&module_export) {
+    ///         Some(Extern::Memory(mem)) => mem,
+    ///         _ => anyhow::bail!("failed to find host memory"),
+    ///     };
+    ///     let data = mem.data(&caller)
+    ///         .get(ptr as u32 as usize..)
+    ///         .and_then(|arr| arr.get(..len as u32 as usize));
+    ///     let string = match data {
+    ///         Some(data) => match str::from_utf8(data) {
+    ///             Ok(s) => s,
+    ///             Err(_) => anyhow::bail!("invalid utf-8"),
+    ///         },
+    ///         None => anyhow::bail!("pointer/length out of bounds"),
+    ///     };
+    ///     assert_eq!(string, "Hello, world!");
+    ///     println!("{}", string);
+    ///     Ok(())
+    /// });
+    /// let instance = Instance::new(&mut store, &module, &[log_str.into()])?;
+    /// let foo = instance.get_typed_func::<(), ()>(&mut store, "foo")?;
+    /// foo.call(&mut store, ())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn get_module_export(&mut self, export: &ModuleExport) -> Option<Extern> {
+        self.caller
+            .host_state()
+            .downcast_ref::<Instance>()?
+            .get_module_export(&mut self.store, export)
     }
 
     /// Access the underlying data owned by this `Store`.
@@ -2219,12 +2281,8 @@ impl HostContext {
 
         let ctx = unsafe {
             VMArrayCallHostFuncContext::new(
-                VMFuncRef {
-                    array_call,
-                    wasm_call: None,
-                    type_index,
-                    vmctx: ptr::null_mut(),
-                },
+                array_call,
+                type_index,
                 Box::new(HostFuncState {
                     func,
                     ty: ty.into_registered_type(),
@@ -2240,7 +2298,8 @@ impl HostContext {
         caller_vmctx: *mut VMOpaqueContext,
         args: *mut ValRaw,
         args_len: usize,
-    ) where
+    ) -> bool
+    where
         F: Fn(Caller<'_, T>, P) -> R + 'static,
         P: WasmTyList,
         R: WasmRet,
@@ -2300,15 +2359,10 @@ impl HostContext {
 
         // With nothing else on the stack move `run` into this
         // closure and then run it as part of `Caller::with`.
-        let result = crate::runtime::vm::catch_unwind_and_longjmp(move || {
+        crate::runtime::vm::catch_unwind_and_record_trap(move || {
             let caller_vmctx = VMContext::from_opaque(caller_vmctx);
             Caller::with(caller_vmctx, run)
-        });
-
-        match result {
-            Ok(val) => val,
-            Err(err) => crate::trap::raise(err),
-        }
+        })
     }
 }
 

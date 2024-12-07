@@ -144,27 +144,27 @@ pub trait PtrSize {
 
     // Offsets within `VMRuntimeLimits`
 
-    /// Return the offset of the `stack_limit` field of `VMRuntimeLimits`
-    #[inline]
-    fn vmruntime_limits_stack_limit(&self) -> u8 {
-        0
-    }
-
     /// Return the offset of the `fuel_consumed` field of `VMRuntimeLimits`
     #[inline]
     fn vmruntime_limits_fuel_consumed(&self) -> u8 {
-        self.size()
+        0
     }
 
     /// Return the offset of the `epoch_deadline` field of `VMRuntimeLimits`
     #[inline]
     fn vmruntime_limits_epoch_deadline(&self) -> u8 {
-        self.vmruntime_limits_fuel_consumed() + 8 // `stack_limit` is a pointer; `fuel_consumed` is an `i64`
+        self.vmruntime_limits_fuel_consumed() + 8
+    }
+
+    /// Return the offset of the `stack_limit` field of `VMRuntimeLimits`
+    #[inline]
+    fn vmruntime_limits_stack_limit(&self) -> u8 {
+        self.vmruntime_limits_epoch_deadline() + 8
     }
 
     /// Return the offset of the `last_wasm_exit_fp` field of `VMRuntimeLimits`.
     fn vmruntime_limits_last_wasm_exit_fp(&self) -> u8 {
-        self.vmruntime_limits_epoch_deadline() + 8
+        self.vmruntime_limits_stack_limit() + self.size()
     }
 
     /// Return the offset of the `last_wasm_exit_pc` field of `VMRuntimeLimits`.
@@ -338,10 +338,10 @@ impl<P: PtrSize> VMOffsets<P> {
     /// Return a new `VMOffsets` instance, for a given pointer size.
     pub fn new(ptr: P, module: &Module) -> Self {
         let num_owned_memories = module
-            .memory_plans
+            .memories
             .iter()
             .skip(module.num_imported_memories)
-            .filter(|p| !p.1.memory.shared)
+            .filter(|p| !p.1.shared)
             .count()
             .try_into()
             .unwrap();
@@ -351,10 +351,8 @@ impl<P: PtrSize> VMOffsets<P> {
             num_imported_tables: cast_to_u32(module.num_imported_tables),
             num_imported_memories: cast_to_u32(module.num_imported_memories),
             num_imported_globals: cast_to_u32(module.num_imported_globals),
-            num_defined_tables: cast_to_u32(module.table_plans.len() - module.num_imported_tables),
-            num_defined_memories: cast_to_u32(
-                module.memory_plans.len() - module.num_imported_memories,
-            ),
+            num_defined_tables: cast_to_u32(module.num_defined_tables()),
+            num_defined_memories: cast_to_u32(module.num_defined_memories()),
             num_owned_memories,
             num_defined_globals: cast_to_u32(module.globals.len() - module.num_imported_globals),
             num_escaped_funcs: cast_to_u32(module.num_escaped_funcs),

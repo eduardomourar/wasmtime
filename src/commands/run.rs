@@ -39,7 +39,7 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
 }
 
 /// Runs a WebAssembly module
-#[derive(Parser, PartialEq)]
+#[derive(Parser)]
 pub struct RunCommand {
     #[command(flatten)]
     #[allow(missing_docs)]
@@ -87,7 +87,7 @@ impl RunCommand {
     pub fn execute(mut self) -> Result<()> {
         self.run.common.init_logging()?;
 
-        let mut config = self.run.common.config(None, None)?;
+        let mut config = self.run.common.config(None)?;
         config.async_support(true);
 
         if self.run.common.wasm.timeout.is_some() {
@@ -233,21 +233,19 @@ impl RunCommand {
                     if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
                         std::process::exit(exit.0);
                     }
-                    if e.is::<wasmtime::Trap>() {
-                        eprintln!("Error: {e:?}");
-                        cfg_if::cfg_if! {
-                            if #[cfg(unix)] {
-                                std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
-                            } else if #[cfg(windows)] {
-                                // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/abort?view=vs-2019
-                                std::process::exit(3);
-                            }
+                }
+                if e.is::<wasmtime::Trap>() {
+                    eprintln!("Error: {e:?}");
+                    cfg_if::cfg_if! {
+                        if #[cfg(unix)] {
+                            std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
+                        } else if #[cfg(windows)] {
+                            // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/abort?view=vs-2019
+                            std::process::exit(3);
                         }
                     }
-                    return Err(e);
-                } else {
-                    unreachable!("either preview1_ctx or preview2_ctx present")
                 }
+                return Err(e);
             }
         }
 
