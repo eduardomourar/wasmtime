@@ -4,7 +4,6 @@ use super::*;
 use crate::ir;
 use crate::isa::pulley_shared::abi::PulleyMachineDeps;
 use crate::isa::pulley_shared::PointerWidth;
-use crate::trace;
 use core::marker::PhantomData;
 use cranelift_control::ControlPlane;
 use pulley_interpreter::encode as enc;
@@ -40,7 +39,6 @@ where
     _phantom: PhantomData<P>,
     ctrl_plane: ControlPlane,
     user_stack_map: Option<ir::UserStackMap>,
-    pub virtual_sp_offset: i64,
     frame_layout: FrameLayout,
 }
 
@@ -50,13 +48,6 @@ where
 {
     fn take_stack_map(&mut self) -> Option<ir::UserStackMap> {
         self.user_stack_map.take()
-    }
-
-    pub(crate) fn adjust_virtual_sp_offset(&mut self, amount: i64) {
-        let old = self.virtual_sp_offset;
-        let new = self.virtual_sp_offset + amount;
-        trace!("adjust virtual sp offset by {amount:#x}: {old:#x} -> {new:#x}",);
-        self.virtual_sp_offset = new;
     }
 }
 
@@ -69,7 +60,6 @@ where
             _phantom: PhantomData,
             ctrl_plane,
             user_stack_map: None,
-            virtual_sp_offset: 0,
             frame_layout: abi.frame_layout().clone(),
         }
     }
@@ -104,8 +94,8 @@ where
         // (with an `EmitIsland`). We check this in debug builds. This is `mut`
         // to allow disabling the check for `JTSequence`, which is always
         // emitted following an `EmitIsland`.
-        let start = sink.cur_offset();
-        pulley_emit(self, sink, emit_info, state, start);
+        let mut start = sink.cur_offset();
+        pulley_emit(self, sink, emit_info, state, &mut start);
 
         let end = sink.cur_offset();
         assert!(
@@ -124,9 +114,9 @@ where
 fn pulley_emit<P>(
     inst: &Inst,
     sink: &mut MachBuffer<InstAndKind<P>>,
-    _emit_info: &EmitInfo,
+    emit_info: &EmitInfo,
     state: &mut EmitState<P>,
-    start_offset: u32,
+    start_offset: &mut u32,
 ) where
     P: PulleyTargetKind,
 {
@@ -149,7 +139,7 @@ fn pulley_emit<P>(
             let label = sink.defer_trap(*code);
 
             let cur_off = sink.cur_offset();
-            sink.use_label_at_offset(cur_off, label, LabelUse::Jump(3));
+            sink.use_label_at_offset(cur_off + 3, label, LabelUse::Jump(3));
 
             use ir::condcodes::IntCC::*;
             use OperandSize::*;
@@ -188,7 +178,7 @@ fn pulley_emit<P>(
 
         Inst::Nop => todo!(),
 
-        Inst::GetSp { dst } => enc::get_sp(sink, dst),
+        Inst::GetSpecial { dst, reg } => enc::xmov(sink, dst, reg),
 
         Inst::Ret => enc::ret(sink),
 
@@ -211,15 +201,48 @@ fn pulley_emit<P>(
             }
             sink.add_call_site();
 
-            let callee_pop_size = i64::from(info.callee_pop_size);
-            state.adjust_virtual_sp_offset(-callee_pop_size);
+            let adjust = -i32::try_from(info.callee_pop_size).unwrap();
+            for i in PulleyMachineDeps::<P>::gen_sp_reg_adjust(adjust) {
+                <InstAndKind<P>>::from(i).emit(sink, emit_info, state);
+            }
         }
 
-        Inst::IndirectCall { .. } => todo!(),
+        Inst::IndirectCall { info } => {
+            enc::call_indirect(sink, info.dest);
+
+            if let Some(s) = state.take_stack_map() {
+                let offset = sink.cur_offset();
+                sink.push_user_stack_map(state, offset, s);
+            }
+
+            sink.add_call_site();
+
+            let adjust = -i32::try_from(info.callee_pop_size).unwrap();
+            for i in PulleyMachineDeps::<P>::gen_sp_reg_adjust(adjust) {
+                <InstAndKind<P>>::from(i).emit(sink, emit_info, state);
+            }
+        }
+
+        Inst::IndirectCallHost { info } => {
+            // Emit a relocation to fill in the actual immediate argument here
+            // in `call_indirect_host`.
+            sink.add_reloc(Reloc::PulleyCallIndirectHost, &info.dest, 0);
+            enc::call_indirect_host(sink, 0_u8);
+
+            if let Some(s) = state.take_stack_map() {
+                let offset = sink.cur_offset();
+                sink.push_user_stack_map(state, offset, s);
+            }
+            sink.add_call_site();
+
+            // If a callee pop is happening here that means that something has
+            // messed up, these are expected to be "very simple" signatures.
+            assert!(info.callee_pop_size == 0);
+        }
 
         Inst::Jump { label } => {
-            sink.use_label_at_offset(start_offset + 1, *label, LabelUse::Jump(1));
-            sink.add_uncond_branch(start_offset, start_offset + 5, *label);
+            sink.use_label_at_offset(*start_offset + 1, *label, LabelUse::Jump(1));
+            sink.add_uncond_branch(*start_offset, *start_offset + 5, *label);
             enc::jump(sink, 0x00000000);
         }
 
@@ -229,7 +252,7 @@ fn pulley_emit<P>(
             not_taken,
         } => {
             // If taken.
-            let taken_start = start_offset + 2;
+            let taken_start = *start_offset + 2;
             let taken_end = taken_start + 4;
 
             sink.use_label_at_offset(taken_start, *taken, LabelUse::Jump(2));
@@ -237,10 +260,10 @@ fn pulley_emit<P>(
             enc::br_if_not(&mut inverted, c, 0x00000000);
             debug_assert_eq!(
                 inverted.len(),
-                usize::try_from(taken_end - start_offset).unwrap()
+                usize::try_from(taken_end - *start_offset).unwrap()
             );
 
-            sink.add_cond_branch(start_offset, taken_end, *taken, &inverted);
+            sink.add_cond_branch(*start_offset, taken_end, *taken, &inverted);
             enc::br_if(sink, c, 0x00000000);
             debug_assert_eq!(sink.cur_offset(), taken_end);
 
@@ -261,7 +284,7 @@ fn pulley_emit<P>(
         } => {
             br_if_cond_helper(
                 sink,
-                start_offset,
+                *start_offset,
                 *src1,
                 *src2,
                 taken,
@@ -279,7 +302,7 @@ fn pulley_emit<P>(
         } => {
             br_if_cond_helper(
                 sink,
-                start_offset,
+                *start_offset,
                 *src1,
                 *src2,
                 taken,
@@ -297,7 +320,7 @@ fn pulley_emit<P>(
         } => {
             br_if_cond_helper(
                 sink,
-                start_offset,
+                *start_offset,
                 *src1,
                 *src2,
                 taken,
@@ -315,7 +338,7 @@ fn pulley_emit<P>(
         } => {
             br_if_cond_helper(
                 sink,
-                start_offset,
+                *start_offset,
                 *src1,
                 *src2,
                 taken,
@@ -333,7 +356,7 @@ fn pulley_emit<P>(
         } => {
             br_if_cond_helper(
                 sink,
-                start_offset,
+                *start_offset,
                 *src1,
                 *src2,
                 taken,
@@ -351,7 +374,7 @@ fn pulley_emit<P>(
         } => {
             br_if_cond_helper(
                 sink,
-                start_offset,
+                *start_offset,
                 *src1,
                 *src2,
                 taken,
@@ -484,6 +507,67 @@ fn pulley_emit<P>(
         Inst::BitcastIntFromFloat64 { dst, src } => enc::bitcast_int_from_float_64(sink, dst, src),
         Inst::BitcastFloatFromInt32 { dst, src } => enc::bitcast_float_from_int_32(sink, dst, src),
         Inst::BitcastFloatFromInt64 { dst, src } => enc::bitcast_float_from_int_64(sink, dst, src),
+
+        Inst::BrTable {
+            idx,
+            default,
+            targets,
+        } => {
+            // Encode the `br_table32` instruction directly which expects the
+            // next `amt` 4-byte integers to all be relative offsets. Each
+            // offset is the pc-relative offset of the branch destination.
+            //
+            // Pulley clamps the branch targets to the `amt` specified so the
+            // final branch target is the default jump target.
+            //
+            // Note that this instruction may have many branch targets so it
+            // manually checks to see if an island is needed. If so we emit a
+            // jump around the island before the `br_table32` itself gets
+            // emitted.
+            let amt = u32::try_from(targets.len() + 1).expect("too many branch targets");
+            let br_table_size = amt * 4 + 6;
+            if sink.island_needed(br_table_size) {
+                let label = sink.get_label();
+                <InstAndKind<P>>::from(Inst::Jump { label }).emit(sink, emit_info, state);
+                sink.emit_island(br_table_size, &mut state.ctrl_plane);
+                sink.bind_label(label, &mut state.ctrl_plane);
+            }
+            enc::br_table32(sink, *idx, amt);
+            for target in targets.iter() {
+                let offset = sink.cur_offset();
+                sink.use_label_at_offset(offset, *target, LabelUse::Jump(0));
+                sink.put4(0);
+            }
+            let offset = sink.cur_offset();
+            sink.use_label_at_offset(offset, *default, LabelUse::Jump(0));
+            sink.put4(0);
+
+            // We manually handled `emit_island` above when dealing with
+            // `island_needed` so update the starting offset to the current
+            // offset so this instruction doesn't accidentally trigger
+            // the assertion that we're always under worst-case-size.
+            *start_offset = sink.cur_offset();
+        }
+
+        Inst::PushFrame => {
+            sink.add_trap(ir::TrapCode::STACK_OVERFLOW);
+            enc::push_frame(sink);
+        }
+        Inst::PopFrame => enc::pop_frame(sink),
+        Inst::StackAlloc32 { amt } => {
+            sink.add_trap(ir::TrapCode::STACK_OVERFLOW);
+            enc::stack_alloc32(sink, *amt);
+        }
+        Inst::StackFree32 { amt } => enc::stack_free32(sink, *amt),
+
+        Inst::Zext8 { dst, src } => enc::zext8(sink, dst, src),
+        Inst::Zext16 { dst, src } => enc::zext16(sink, dst, src),
+        Inst::Zext32 { dst, src } => enc::zext32(sink, dst, src),
+        Inst::Sext8 { dst, src } => enc::sext8(sink, dst, src),
+        Inst::Sext16 { dst, src } => enc::sext16(sink, dst, src),
+        Inst::Sext32 { dst, src } => enc::sext32(sink, dst, src),
+        Inst::Bswap32 { dst, src } => enc::bswap32(sink, dst, src),
+        Inst::Bswap64 { dst, src } => enc::bswap64(sink, dst, src),
     }
 }
 

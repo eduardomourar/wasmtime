@@ -10,6 +10,7 @@
 // built for one platform we don't have to worry too much about trimming
 // everything down.
 #![cfg_attr(not(feature = "all-arch"), allow(dead_code))]
+#![expect(clippy::allow_attributes_without_reason, reason = "crate not migrated")]
 
 #[allow(unused_imports)] // #[macro_use] is required for no_std
 #[macro_use]
@@ -99,7 +100,7 @@ pub mod incremental_cache;
 #[macro_export]
 macro_rules! trace {
     ($($tt:tt)*) => {
-        if cfg!(feature = "trace-log") {
+        if cfg!(any(feature = "trace-log", debug_assertions)) {
             ::log::trace!($($tt)*);
         }
     };

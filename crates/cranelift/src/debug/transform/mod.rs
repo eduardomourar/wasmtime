@@ -1,3 +1,4 @@
+use self::debug_transform_logging::dbi_log;
 use self::refs::DebugInfoRefsMap;
 use self::simulate::generate_simulated_dwarf;
 use self::unit::clone_unit;
@@ -7,6 +8,7 @@ use anyhow::Error;
 use cranelift_codegen::isa::TargetIsa;
 use gimli::{write, Dwarf, DwarfPackage, LittleEndian, Section, Unit, UnitSectionOffset};
 use std::{collections::HashSet, fmt::Debug};
+use synthetic::ModuleSyntheticUnit;
 use thiserror::Error;
 use wasmtime_environ::{
     DefinedFuncIndex, ModuleTranslation, PrimaryMap, StaticModuleIndex, Tunables,
@@ -16,11 +18,13 @@ pub use address_transform::AddressTransform;
 
 mod address_transform;
 mod attr;
+mod debug_transform_logging;
 mod expression;
 mod line_program;
 mod range_info_builder;
 mod refs;
 mod simulate;
+mod synthetic;
 mod unit;
 mod utils;
 
@@ -141,6 +145,8 @@ pub fn transform_dwarf(
     isa: &dyn TargetIsa,
     compilation: &mut Compilation<'_>,
 ) -> Result<write::Dwarf, Error> {
+    dbi_log!("Commencing DWARF transform for {:?}", compilation);
+
     let mut transforms = PrimaryMap::new();
     for (i, _) in compilation.translations.iter() {
         transforms.push(AddressTransform::new(compilation, i));
@@ -161,28 +167,38 @@ pub fn transform_dwarf(
 
     let out_encoding = gimli::Encoding {
         format: gimli::Format::Dwarf32,
-        // TODO: this should be configurable
-        version: 4,
+        version: 4, // TODO: this should be configurable
         address_size: isa.pointer_bytes(),
     };
-
     let mut out_strings = write::StringTable::default();
     let mut out_units = write::UnitTable::default();
 
     let out_line_strings = write::LineStringTable::default();
     let mut pending_di_refs = Vec::new();
     let mut di_ref_map = DebugInfoRefsMap::new();
+    let mut vmctx_ptr_die_refs = PrimaryMap::new();
 
     let mut translated = HashSet::new();
 
     for (module, translation) in compilation.translations.iter() {
+        dbi_log!("[== Transforming CUs for module #{} ==]", module.as_u32());
+
         let addr_tr = &transforms[module];
         let di = &translation.debuginfo;
         let context = DebugInputContext {
             reachable: &reachable,
         };
-        let mut iter = di.dwarf.debug_info.units();
+        let out_module_synthetic_unit = ModuleSyntheticUnit::new(
+            module,
+            compilation,
+            out_encoding,
+            &mut out_units,
+            &mut out_strings,
+        );
+        // TODO-LLVM-DI-Cleanup: move the simulation code to be per-module and delete this map.
+        vmctx_ptr_die_refs.push(out_module_synthetic_unit.vmctx_ptr_die_ref());
 
+        let mut iter = di.dwarf.debug_info.units();
         while let Some(header) = iter.next().unwrap_or(None) {
             let unit = di.dwarf.unit(header)?;
 
@@ -209,6 +225,7 @@ pub fn transform_dwarf(
                 &context,
                 &addr_tr,
                 out_encoding,
+                &out_module_synthetic_unit,
                 &mut out_units,
                 &mut out_strings,
                 &mut translated,
@@ -226,6 +243,7 @@ pub fn transform_dwarf(
         &transforms,
         &translated,
         out_encoding,
+        &vmctx_ptr_die_refs,
         &mut out_units,
         &mut out_strings,
         isa,

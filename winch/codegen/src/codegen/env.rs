@@ -11,8 +11,8 @@ use std::collections::{
 use std::mem;
 use wasmparser::BlockType;
 use wasmtime_environ::{
-    BuiltinFunctionIndex, FuncIndex, GlobalIndex, MemoryIndex, MemoryPlan, MemoryStyle,
-    ModuleTranslation, ModuleTypesBuilder, PrimaryMap, PtrSize, TableIndex, TablePlan, TypeConvert,
+    BuiltinFunctionIndex, FuncIndex, GlobalIndex, IndexType, Memory, MemoryIndex,
+    ModuleTranslation, ModuleTypesBuilder, PrimaryMap, PtrSize, Table, TableIndex, TypeConvert,
     TypeIndex, VMOffsets, WasmHeapType, WasmValType,
 };
 
@@ -42,20 +42,6 @@ pub struct TableData {
     pub(crate) current_elements_size: OperandSize,
 }
 
-/// Style of the heap.
-#[derive(Debug, Copy, Clone)]
-pub enum HeapStyle {
-    /// Static heap, which has a fixed address.
-    Static {
-        /// The heap bound in bytes, not including the bytes for the offset
-        /// guard pages.
-        bound: u64,
-    },
-    /// Dynamic heap, which can be relocated to a different address when grown.
-    /// The bounds are calculated at runtime on every access.
-    Dynamic,
-}
-
 /// Heap metadata.
 ///
 /// Heaps represent a WebAssembly linear memory.
@@ -71,21 +57,17 @@ pub struct HeapData {
     /// If the WebAssembly memory is imported, this field contains the offset to locate the
     /// base of the heap.
     pub import_from: Option<u32>,
-    /// The memory type (32 or 64).
-    pub ty: WasmValType,
-    /// The style of the heap.
-    pub style: HeapStyle,
-    /// The guaranteed minimum size, in bytes.
-    pub min_size: u64,
-    /// The maximum heap size in bytes.
-    pub max_size: Option<u64>,
-    /// The log2 of this memory's page size, in bytes.
-    ///
-    /// By default the page size is 64KiB (0x10000; 2**16; 1<<16; 65536) but the
-    /// custom-page-sizes proposal allows opting into a page size of `1`.
-    pub page_size_log2: u8,
-    /// Size in bytes of the offset guard pages, located after the heap bounds.
-    pub offset_guard_size: u64,
+    /// The memory type this heap is associated with.
+    pub memory: Memory,
+}
+
+impl HeapData {
+    pub fn index_type(&self) -> WasmValType {
+        match self.memory.idx_type {
+            IndexType::I32 => WasmValType::I32,
+            IndexType::I64 => WasmValType::I64,
+        }
+    }
 }
 
 /// A function callee.
@@ -134,6 +116,8 @@ pub struct FuncEnv<'a, 'translation: 'a, 'data: 'translation, P: PtrSize> {
     heap_access_spectre_mitigation: bool,
     /// Whether or not to enable Spectre mitigation on table element accesses.
     table_access_spectre_mitigation: bool,
+    /// Size of pages on the compilation target.
+    pub page_size_log2: u8,
     name_map: PrimaryMap<UserExternalNameRef, UserExternalName>,
     name_intern: HashMap<UserExternalName, UserExternalNameRef>,
 }
@@ -166,6 +150,7 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
             ptr_type,
             heap_access_spectre_mitigation: isa.flags().enable_heap_access_spectre_mitigation(),
             table_access_spectre_mitigation: isa.flags().enable_table_access_spectre_mitigation(),
+            page_size_log2: isa.page_size_align_log2(),
             builtins,
             name_map: Default::default(),
             name_intern: Default::default(),
@@ -289,31 +274,21 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
                         ),
                     };
 
-                let plan = &self.translation.module.memory_plans[index];
-                let (min_size, max_size) = heap_limits(&plan);
-                let (style, offset_guard_size) = heap_style_and_offset_guard_size(&plan);
+                let memory = &self.translation.module.memories[index];
 
                 *entry.insert(HeapData {
                     offset: base_offset,
                     import_from,
                     current_length_offset,
-                    style,
-                    ty: match plan.memory.idx_type {
-                        wasmtime_environ::IndexType::I32 => WasmValType::I32,
-                        wasmtime_environ::IndexType::I64 => WasmValType::I64,
-                    },
-                    min_size,
-                    max_size,
-                    page_size_log2: plan.memory.page_size_log2,
-                    offset_guard_size,
+                    memory: *memory,
                 })
             }
         }
     }
 
-    /// Get a [`TablePlan`] from a [`TableIndex`].
-    pub fn table_plan(&mut self, index: TableIndex) -> &TablePlan {
-        &self.translation.module.table_plans[index]
+    /// Get a [`Table`] from a [`TableIndex`].
+    pub fn table(&mut self, index: TableIndex) -> &Table {
+        &self.translation.module.tables[index]
     }
 
     /// Returns true if Spectre mitigations are enabled for heap bounds check.
@@ -418,36 +393,4 @@ impl<'a, 'data> TypeConverter<'a, 'data> {
     pub fn new(translation: &'a ModuleTranslation<'data>, types: &'a ModuleTypesBuilder) -> Self {
         Self { translation, types }
     }
-}
-
-fn heap_style_and_offset_guard_size(plan: &MemoryPlan) -> (HeapStyle, u64) {
-    match plan {
-        MemoryPlan {
-            style: MemoryStyle::Static { byte_reservation },
-            offset_guard_size,
-            ..
-        } => (
-            HeapStyle::Static {
-                bound: *byte_reservation,
-            },
-            *offset_guard_size,
-        ),
-
-        MemoryPlan {
-            style: MemoryStyle::Dynamic { .. },
-            offset_guard_size,
-            ..
-        } => (HeapStyle::Dynamic, *offset_guard_size),
-    }
-}
-
-fn heap_limits(plan: &MemoryPlan) -> (u64, Option<u64>) {
-    (
-        plan.memory.minimum_byte_size().unwrap_or_else(|_| {
-            // 2^64 as a minimum doesn't fin in a 64 bit integer.
-            // So in this case, the minimum is clamped to u64::MAX.
-            u64::MAX
-        }),
-        plan.memory.maximum_byte_size().ok(),
-    )
 }

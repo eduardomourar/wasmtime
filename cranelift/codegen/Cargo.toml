@@ -1,7 +1,7 @@
 [package]
 authors = ["The Cranelift Project Developers"]
 name = "cranelift-codegen"
-version = "0.114.0"
+version = "0.116.0"
 description = "Low-level code generator library"
 license = "Apache-2.0 WITH LLVM-exception"
 documentation = "https://docs.rs/cranelift-codegen"
@@ -17,14 +17,14 @@ rust-version.workspace = true
 workspace = true
 
 [package.metadata.docs.rs]
-# Ask Cargo to build docs with the feature `all-arch` 
+# Ask Cargo to build docs with the feature `all-arch`
 features = ["all-arch"]
 
 [dependencies]
 anyhow = { workspace = true, optional = true, features = ['std'] }
 bumpalo = "3"
 capstone = { workspace = true, optional = true }
-cranelift-codegen-shared = { path = "./shared", version = "0.114.0" }
+cranelift-codegen-shared = { path = "./shared", version = "0.116.0" }
 cranelift-entity = { workspace = true }
 cranelift-bforest = { workspace = true }
 cranelift-bitset = { workspace = true }
@@ -53,8 +53,8 @@ similar = "2.1.0"
 env_logger = { workspace = true }
 
 [build-dependencies]
-cranelift-codegen-meta = { path = "meta", version = "0.114.0" }
-cranelift-isle = { path = "../isle/isle", version = "=0.114.0" }
+cranelift-codegen-meta = { path = "meta", version = "0.116.0" }
+cranelift-isle = { path = "../isle/isle", version = "=0.116.0" }
 
 [features]
 default = ["std", "unwind", "host-arch", "timing"]
@@ -62,7 +62,7 @@ default = ["std", "unwind", "host-arch", "timing"]
 # The "std" feature enables use of libstd. The "core" feature enables use
 # of some minimal std-like replacement libraries. At least one of these two
 # features need to be enabled.
-std = []
+std = ["serde?/std"]
 
 # The "core" feature used to enable a hashmap workaround, but is now
 # deprecated (we (i) always use hashbrown, and (ii) don't support a
@@ -127,10 +127,6 @@ souper-harvest = ["souper-ir", "souper-ir/stringify"]
 
 # Report any ISLE errors in pretty-printed style.
 isle-errors = ["cranelift-isle/fancy-errors"]
-
-# Put ISLE generated files in isle_generated_code/, for easier
-# inspection, rather than inside of target/.
-isle-in-source-tree = []
 
 # Enable tracking how long passes take in Cranelift.
 #

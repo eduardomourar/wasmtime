@@ -1,14 +1,14 @@
 //! Evaluating const expressions.
 
 use crate::runtime::vm::{Instance, VMGcRef, ValRaw, I31};
-use crate::store::AutoAssertNoGc;
+use crate::store::{AutoAssertNoGc, StoreOpaque};
 use crate::{
     prelude::*, ArrayRef, ArrayRefPre, ArrayType, StructRef, StructRefPre, StructType, Val,
 };
 use smallvec::SmallVec;
 use wasmtime_environ::{
-    ConstExpr, ConstOp, FuncIndex, GlobalIndex, ModuleInternedTypeIndex, WasmCompositeType,
-    WasmSubType,
+    ConstExpr, ConstOp, FuncIndex, GlobalIndex, ModuleInternedTypeIndex, WasmCompositeInnerType,
+    WasmCompositeType, WasmSubType,
 };
 
 /// An interpreter for const expressions.
@@ -44,7 +44,7 @@ impl<'a> ConstEvalContext<'a> {
 
     fn ref_func(&mut self, index: FuncIndex) -> Result<ValRaw> {
         Ok(ValRaw::funcref(
-            self.instance.get_func_ref(index).unwrap().cast(),
+            self.instance.get_func_ref(index).unwrap().as_ptr().cast(),
         ))
     }
 
@@ -55,8 +55,8 @@ impl<'a> ConstEvalContext<'a> {
             .runtime_module()
             .expect("should never be allocating a struct type defined in a dummy module");
 
-        let struct_ty = match &module.types()[struct_type_index].composite_type {
-            WasmCompositeType::Struct(s) => s,
+        let struct_ty = match &module.types()[struct_type_index].composite_type.inner {
+            WasmCompositeInnerType::Struct(s) => s,
             _ => unreachable!(),
         };
 
@@ -118,7 +118,11 @@ impl<'a> ConstEvalContext<'a> {
             .borrow(shared_ty)
             .expect("should have a registered type for struct");
         let WasmSubType {
-            composite_type: WasmCompositeType::Struct(struct_ty),
+            composite_type:
+                WasmCompositeType {
+                    shared: false,
+                    inner: WasmCompositeInnerType::Struct(struct_ty),
+                },
             ..
         } = &*borrowed
         else {
@@ -162,6 +166,7 @@ impl ConstExprEvaluator {
     /// the correct type.
     pub unsafe fn eval(
         &mut self,
+        store: &mut StoreOpaque,
         context: &mut ConstEvalContext<'_>,
         expr: &ConstExpr,
     ) -> Result<ValRaw> {
@@ -169,13 +174,13 @@ impl ConstExprEvaluator {
 
         self.stack.clear();
 
-        let mut store = (*context.instance.store()).store_opaque_mut();
-
         // Ensure that we don't permanently root any GC references we allocate
         // during const evaluation, keeping them alive for the duration of the
         // store's lifetime.
         #[cfg(feature = "gc")]
-        let mut store = crate::OpaqueRootScope::new(&mut store);
+        let mut store = crate::OpaqueRootScope::new(store);
+        #[cfg(not(feature = "gc"))]
+        let mut store = store;
 
         // We cannot allow GC during const evaluation because the stack of
         // `ValRaw`s are not rooted. If we had a GC reference on our stack, and

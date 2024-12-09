@@ -1,7 +1,7 @@
 //! Implementation of a standard Pulley ABI.
 
 use super::{inst::*, PulleyFlags, PulleyTargetKind};
-use crate::isa::pulley_shared::PulleyBackend;
+use crate::isa::pulley_shared::{PointerWidth, PulleyBackend};
 use crate::{
     ir::{self, types::*, MemFlags, Signature},
     isa::{self, unwind::UnwindInst},
@@ -172,14 +172,24 @@ where
     }
 
     fn gen_extend(
-        _to_reg: Writable<Reg>,
-        _from_reg: Reg,
-        _signed: bool,
+        dst: Writable<Reg>,
+        src: Reg,
+        signed: bool,
         from_bits: u8,
         to_bits: u8,
     ) -> Self::I {
         assert!(from_bits < to_bits);
-        todo!()
+        let src = XReg::new(src).unwrap();
+        let dst = dst.try_into().unwrap();
+        match (signed, from_bits) {
+            (true, 8) => Inst::Sext8 { dst, src }.into(),
+            (true, 16) => Inst::Sext16 { dst, src }.into(),
+            (true, 32) => Inst::Sext32 { dst, src }.into(),
+            (false, 8) => Inst::Zext8 { dst, src }.into(),
+            (false, 16) => Inst::Zext16 { dst, src }.into(),
+            (false, 32) => Inst::Zext32 { dst, src }.into(),
+            _ => unimplemented!("extend {from_bits} to {to_bits} as signed? {signed}"),
+        }
     }
 
     fn get_ext_mode(
@@ -220,18 +230,8 @@ where
         ]
     }
 
-    fn gen_stack_lower_bound_trap(limit_reg: Reg) -> SmallInstVec<Self::I> {
-        smallvec![Inst::TrapIf {
-            cond: ir::condcodes::IntCC::UnsignedLessThan,
-            size: match P::pointer_width() {
-                super::PointerWidth::PointerWidth32 => OperandSize::Size32,
-                super::PointerWidth::PointerWidth64 => OperandSize::Size64,
-            },
-            src1: limit_reg.try_into().unwrap(),
-            src2: pulley_interpreter::regs::XReg::sp.into(),
-            code: ir::TrapCode::STACK_OVERFLOW,
-        }
-        .into()]
+    fn gen_stack_lower_bound_trap(_limit_reg: Reg) -> SmallInstVec<Self::I> {
+        unimplemented!("pulley shouldn't need stack bound checks")
     }
 
     fn gen_get_stack_addr(mem: StackAMode, dst: Writable<Reg>) -> Self::I {
@@ -254,29 +254,25 @@ where
     }
 
     fn gen_sp_reg_adjust(amount: i32) -> SmallInstVec<Self::I> {
-        let temp = WritableXReg::try_from(writable_spilltmp_reg()).unwrap();
+        if amount == 0 {
+            return smallvec![];
+        }
 
-        let imm = if let Ok(x) = i8::try_from(amount) {
-            Inst::Xconst8 { dst: temp, imm: x }.into()
-        } else if let Ok(x) = i16::try_from(amount) {
-            Inst::Xconst16 { dst: temp, imm: x }.into()
+        let inst = if amount < 0 {
+            let amount = amount.checked_neg().unwrap();
+            if let Ok(amt) = u32::try_from(amount) {
+                Inst::StackAlloc32 { amt }
+            } else {
+                unreachable!()
+            }
         } else {
-            Inst::Xconst32 {
-                dst: temp,
-                imm: amount,
+            if let Ok(amt) = u32::try_from(amount) {
+                Inst::StackFree32 { amt }
+            } else {
+                unreachable!()
             }
-            .into()
         };
-
-        smallvec![
-            imm,
-            Inst::Xadd32 {
-                dst: WritableXReg::try_from(writable_stack_reg()).unwrap(),
-                src1: XReg::new(stack_reg()).unwrap(),
-                src2: temp.to_reg(),
-            }
-            .into()
-        ]
+        smallvec![inst.into()]
     }
 
     fn gen_prologue_frame_setup(
@@ -288,29 +284,7 @@ where
         let mut insts = SmallVec::new();
 
         if frame_layout.setup_area_size > 0 {
-            // sp = sub sp, 16 ;; alloc stack space for frame pointer and return address.
-            // store sp+8, lr  ;; save return address.
-            // store sp, fp    ;; save old fp.
-            // mov sp, fp      ;; set fp to sp.
-            insts.extend(Self::gen_sp_reg_adjust(-16));
-            insts.push(
-                Inst::gen_store(
-                    Amode::SpOffset { offset: 8 },
-                    link_reg(),
-                    I64,
-                    MemFlags::trusted(),
-                )
-                .into(),
-            );
-            insts.push(
-                Inst::gen_store(
-                    Amode::SpOffset { offset: 0 },
-                    fp_reg(),
-                    I64,
-                    MemFlags::trusted(),
-                )
-                .into(),
-            );
+            insts.push(Inst::PushFrame.into());
             if flags.unwind_info() {
                 insts.push(
                     Inst::Unwind {
@@ -321,13 +295,6 @@ where
                     .into(),
                 );
             }
-            insts.push(
-                Inst::Xmov {
-                    dst: Writable::from_reg(XReg::new(fp_reg()).unwrap()),
-                    src: XReg::new(stack_reg()).unwrap(),
-                }
-                .into(),
-            );
         }
 
         insts
@@ -343,25 +310,7 @@ where
         let mut insts = SmallVec::new();
 
         if frame_layout.setup_area_size > 0 {
-            insts.push(
-                Inst::gen_load(
-                    writable_link_reg(),
-                    Amode::SpOffset { offset: 8 },
-                    I64,
-                    MemFlags::trusted(),
-                )
-                .into(),
-            );
-            insts.push(
-                Inst::gen_load(
-                    writable_fp_reg(),
-                    Amode::SpOffset { offset: 0 },
-                    I64,
-                    MemFlags::trusted(),
-                )
-                .into(),
-            );
-            insts.extend(Self::gen_sp_reg_adjust(16));
+            insts.push(Inst::PopFrame.into());
         }
 
         if frame_layout.tail_args_size > 0 {
@@ -382,7 +331,8 @@ where
     }
 
     fn gen_probestack(_insts: &mut SmallInstVec<Self::I>, _frame_size: u32) {
-        todo!()
+        // Pulley doesn't implement stack probes since all stack pointer
+        // decrements are checked already.
     }
 
     fn gen_clobber_save(
@@ -405,7 +355,7 @@ where
                 insts.push(
                     Inst::gen_store(
                         Amode::SpOffset { offset: 8 },
-                        link_reg(),
+                        lr_reg(),
                         I64,
                         MemFlags::trusted(),
                     )
@@ -541,36 +491,29 @@ where
         insts
     }
 
-    fn gen_call(dest: &CallDest, tmp: Writable<Reg>, info: CallInfo<()>) -> SmallVec<[Self::I; 2]> {
-        if info.callee_conv == isa::CallConv::Tail || info.callee_conv == isa::CallConv::Fast {
-            match &dest {
-                &CallDest::ExtName(ref name, RelocDistance::Near) => smallvec![Inst::Call {
-                    info: Box::new(info.map(|()| name.clone()))
-                }
-                .into()],
-                &CallDest::ExtName(ref name, RelocDistance::Far) => smallvec![
-                    Inst::LoadExtName {
-                        dst: WritableXReg::try_from(tmp).unwrap(),
-                        name: Box::new(name.clone()),
-                        offset: 0,
-                    }
-                    .into(),
-                    Inst::IndirectCall {
-                        info: Box::new(info.map(|()| XReg::new(tmp.to_reg()).unwrap()))
-                    }
-                    .into(),
-                ],
-                &CallDest::Reg(reg) => smallvec![Inst::IndirectCall {
-                    info: Box::new(info.map(|()| XReg::new(*reg).unwrap()))
-                }
-                .into()],
+    fn gen_call(
+        dest: &CallDest,
+        _tmp: Writable<Reg>,
+        info: CallInfo<()>,
+    ) -> SmallVec<[Self::I; 2]> {
+        match dest {
+            // "near" calls are pulley->pulley calls so they use a normal "call"
+            // opcode
+            CallDest::ExtName(name, RelocDistance::Near) => smallvec![Inst::Call {
+                info: Box::new(info.map(|()| name.clone()))
             }
-        } else {
-            todo!(
-                "host calls? callee_conv = {:?}; caller_conv = {:?}",
-                info.callee_conv,
-                info.caller_conv,
-            )
+            .into()],
+            // "far" calls are pulley->host calls so they use a different opcode
+            // which is lowered with a special relocation in the backend.
+            CallDest::ExtName(name, RelocDistance::Far) => smallvec![Inst::IndirectCallHost {
+                info: Box::new(info.map(|()| name.clone()))
+            }
+            .into()],
+            // Indirect calls are all assumed to be pulley->pulley calls
+            CallDest::Reg(reg) => smallvec![Inst::IndirectCall {
+                info: Box::new(info.map(|()| XReg::new(*reg).unwrap()))
+            }
+            .into()],
         }
     }
 
@@ -585,11 +528,23 @@ where
     }
 
     fn get_number_of_spillslots_for_value(
-        _rc: RegClass,
+        rc: RegClass,
         _target_vector_bytes: u32,
         _isa_flags: &PulleyFlags,
     ) -> u32 {
-        todo!()
+        match rc {
+            // Spilling an integer register requires spilling 8 bytes, and spill
+            // slots are defined in terms of "word bytes" or the size of a
+            // pointer. That means on 32-bit pulley we need to take up two spill
+            // slots for integers where on 64-bit pulley we need to only take up
+            // one spill slot for integers.
+            RegClass::Int => match P::pointer_width() {
+                PointerWidth::PointerWidth32 => 2,
+                PointerWidth::PointerWidth64 => 1,
+            },
+            RegClass::Float => todo!(),
+            RegClass::Vector => unreachable!(),
+        }
     }
 
     fn get_machine_env(_flags: &settings::Flags, _call_conv: isa::CallConv) -> &MachineEnv {
@@ -654,7 +609,8 @@ where
         _frame_size: u32,
         _guard_size: u32,
     ) {
-        todo!()
+        // Pulley doesn't need inline probestacks because it always checks stack
+        // decrements.
     }
 }
 
@@ -807,7 +763,9 @@ fn create_reg_enviroment() -> MachineEnv {
     };
 
     let non_preferred_regs_by_class: [Vec<PReg>; 3] = {
-        let x_registers: Vec<PReg> = (16..32).map(|x| px_reg(x)).collect();
+        let x_registers: Vec<PReg> = (16..XReg::SPECIAL_START)
+            .map(|x| px_reg(x.into()))
+            .collect();
         let f_registers: Vec<PReg> = (16..32).map(|x| pf_reg(x)).collect();
         let v_registers: Vec<PReg> = vec![];
         [x_registers, f_registers, v_registers]

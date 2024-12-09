@@ -2,8 +2,9 @@ use crate::prelude::*;
 use core::fmt::{self, Display, Write};
 use wasmtime_environ::{
     EngineOrModuleTypeIndex, EntityType, Global, IndexType, Limits, Memory, ModuleTypes, Table,
-    TypeTrace, VMSharedTypeIndex, WasmArrayType, WasmCompositeType, WasmFieldType, WasmFuncType,
-    WasmHeapType, WasmRefType, WasmStorageType, WasmStructType, WasmSubType, WasmValType,
+    TypeTrace, VMSharedTypeIndex, WasmArrayType, WasmCompositeInnerType, WasmCompositeType,
+    WasmFieldType, WasmFuncType, WasmHeapType, WasmRefType, WasmStorageType, WasmStructType,
+    WasmSubType, WasmValType,
 };
 
 use crate::{type_registry::RegisteredType, Engine};
@@ -1361,7 +1362,14 @@ impl StorageType {
     /// Panics if either type is associated with a different engine from the
     /// other.
     pub fn eq(a: &Self, b: &Self) -> bool {
-        a.matches(b) && b.matches(a)
+        match (a, b) {
+            (StorageType::I8, StorageType::I8) => true,
+            (StorageType::I8, _) => false,
+            (StorageType::I16, StorageType::I16) => true,
+            (StorageType::I16, _) => false,
+            (StorageType::ValType(a), StorageType::ValType(b)) => ValType::eq(a, b),
+            (StorageType::ValType(_), _) => false,
+        }
     }
 
     pub(crate) fn comes_from_same_engine(&self, engine: &Engine) -> bool {
@@ -1456,8 +1464,21 @@ impl FieldType {
     /// Panics if either type is associated with a different engine from the
     /// other.
     pub fn matches(&self, other: &Self) -> bool {
-        (other.mutability == Mutability::Var || self.mutability == Mutability::Const)
-            && self.element_type.matches(&other.element_type)
+        // Our storage type must match `other`'s storage type and either
+        //
+        // 1. Both field types are immutable, or
+        //
+        // 2. Both field types are mutable and `other`'s storage type must match
+        //    ours, i.e. the storage types are exactly the same.
+        use Mutability as M;
+        match (self.mutability, other.mutability) {
+            // Case 1
+            (M::Const, M::Const) => self.element_type.matches(&other.element_type),
+            // Case 2
+            (M::Var, M::Var) => StorageType::eq(&self.element_type, &other.element_type),
+            // Does not match.
+            _ => false,
+        }
     }
 
     /// Is field type `a` precisely equal to field type `b`?
@@ -1617,6 +1638,7 @@ impl StructType {
         Self::from_wasm_struct_type(
             engine,
             finality.is_final(),
+            false,
             supertype.map(|ty| ty.type_index().into()),
             WasmStructType { fields },
         )
@@ -1674,13 +1696,9 @@ impl StructType {
     pub fn matches(&self, other: &StructType) -> bool {
         assert!(self.comes_from_same_engine(other.engine()));
 
-        // Avoid matching on structure for subtyping checks when we have
-        // precisely the same type.
-        if self.type_index() == other.type_index() {
-            return true;
-        }
-
-        Self::fields_match(self.fields(), other.fields())
+        self.engine()
+            .signatures()
+            .is_subtype(self.type_index(), other.type_index())
     }
 
     fn fields_match(
@@ -1733,6 +1751,7 @@ impl StructType {
     pub(crate) fn from_wasm_struct_type(
         engine: &Engine,
         is_final: bool,
+        is_shared: bool,
         supertype: Option<EngineOrModuleTypeIndex>,
         ty: WasmStructType,
     ) -> Result<StructType> {
@@ -1750,7 +1769,10 @@ impl StructType {
             WasmSubType {
                 is_final,
                 supertype,
-                composite_type: WasmCompositeType::Struct(ty),
+                composite_type: WasmCompositeType {
+                    shared: is_shared,
+                    inner: WasmCompositeInnerType::Struct(ty),
+                },
             },
         );
         Ok(Self {
@@ -1934,13 +1956,9 @@ impl ArrayType {
     pub fn matches(&self, other: &ArrayType) -> bool {
         assert!(self.comes_from_same_engine(other.engine()));
 
-        // Avoid matching on structure for subtyping checks when we have
-        // precisely the same type.
-        if self.type_index() == other.type_index() {
-            return true;
-        }
-
-        self.field_type().matches(&other.field_type())
+        self.engine()
+            .signatures()
+            .is_subtype(self.type_index(), other.type_index())
     }
 
     /// Is array type `a` precisely equal to array type `b`?
@@ -1994,7 +2012,10 @@ impl ArrayType {
             WasmSubType {
                 is_final,
                 supertype,
-                composite_type: WasmCompositeType::Array(ty),
+                composite_type: WasmCompositeType {
+                    shared: false,
+                    inner: WasmCompositeInnerType::Array(ty),
+                },
             },
         );
         Self {
@@ -2350,7 +2371,10 @@ impl FuncType {
             WasmSubType {
                 is_final,
                 supertype,
-                composite_type: WasmCompositeType::Func(ty),
+                composite_type: WasmCompositeType {
+                    shared: false,
+                    inner: WasmCompositeInnerType::Func(ty),
+                },
             },
         );
         Self {
@@ -2545,7 +2569,7 @@ impl TableType {
 /// # fn foo() -> wasmtime::Result<()> {
 /// use wasmtime::MemoryTypeBuilder;
 ///
-/// let memory_type = MemoryTypeBuilder::default()
+/// let memory_type = MemoryTypeBuilder::new()
 ///     // Set the minimum size, in pages.
 ///     .min(4096)
 ///     // Set the maximum size, in pages.
@@ -2575,6 +2599,21 @@ impl Default for MemoryTypeBuilder {
 }
 
 impl MemoryTypeBuilder {
+    /// Create a new builder for a [`MemoryType`] with the default settings.
+    ///
+    /// By default memory types have the following properties:
+    ///
+    /// * The minimum memory size is 0 pages.
+    /// * The maximum memory size is unspecified.
+    /// * Memories use 32-bit indexes.
+    /// * The page size is 64KiB.
+    ///
+    /// Each option can be configued through the methods on the returned
+    /// builder.
+    pub fn new() -> MemoryTypeBuilder {
+        MemoryTypeBuilder::default()
+    }
+
     fn validate(&self) -> Result<()> {
         if self
             .ty
@@ -2602,7 +2641,6 @@ impl MemoryTypeBuilder {
         let min = self
             .ty
             .minimum_byte_size()
-            .err2anyhow()
             .context("memory's minimum byte size must fit in a u64")?;
         if min > absolute_max {
             bail!("minimum size is too large for this memory type's index type");
@@ -2782,6 +2820,14 @@ impl MemoryType {
             .max(Some(maximum.into()))
             .build()
             .unwrap()
+    }
+
+    /// Creates a new [`MemoryTypeBuilder`] to configure all the various knobs
+    /// of the final memory type being created.
+    ///
+    /// This is a convenience function for [`MemoryTypeBuilder::new`].
+    pub fn builder() -> MemoryTypeBuilder {
+        MemoryTypeBuilder::new()
     }
 
     /// Returns whether this is a 64-bit memory or not.
