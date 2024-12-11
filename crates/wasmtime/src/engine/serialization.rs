@@ -24,7 +24,7 @@
 use crate::prelude::*;
 use crate::{Engine, ModuleVersionStrategy, Precompiled};
 use core::str::FromStr;
-use object::endian::NativeEndian;
+use object::endian::Endianness;
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 use object::write::{Object, StandardSegment};
 use object::{read::elf::ElfFile64, FileFlags, Object as _, ObjectSection, SectionKind};
@@ -56,8 +56,8 @@ pub fn check_compatible(engine: &Engine, mmap: &[u8], expected: ObjectKind) -> R
     // structured well enough to make this easy and additionally it's not really
     // a perf issue right now so doing that is left for another day's
     // refactoring.
-    let obj = ElfFile64::<NativeEndian>::parse(mmap)
-        .err2anyhow()
+    let obj = ElfFile64::<Endianness>::parse(mmap)
+        .map_err(obj::ObjectCrateErrorWrapper)
         .context("failed to parse precompiled artifact as an ELF")?;
     let expected_e_flags = match expected {
         ObjectKind::Module => obj::EF_WASMTIME_MODULE,
@@ -76,7 +76,7 @@ pub fn check_compatible(engine: &Engine, mmap: &[u8], expected: ObjectKind) -> R
         .section_by_name(obj::ELF_WASM_ENGINE)
         .ok_or_else(|| anyhow!("failed to find section `{}`", obj::ELF_WASM_ENGINE))?
         .data()
-        .err2anyhow()?;
+        .map_err(obj::ObjectCrateErrorWrapper)?;
     let (first, data) = data
         .split_first()
         .ok_or_else(|| anyhow!("invalid engine section"))?;
@@ -95,7 +95,7 @@ pub fn check_compatible(engine: &Engine, mmap: &[u8], expected: ObjectKind) -> R
 
     match &engine.config().module_version {
         ModuleVersionStrategy::WasmtimeVersion => {
-            let version = core::str::from_utf8(version).err2anyhow()?;
+            let version = core::str::from_utf8(version)?;
             if version != env!("CARGO_PKG_VERSION") {
                 bail!(
                     "Module was compiled with incompatible Wasmtime version '{}'",
@@ -104,7 +104,7 @@ pub fn check_compatible(engine: &Engine, mmap: &[u8], expected: ObjectKind) -> R
             }
         }
         ModuleVersionStrategy::Custom(v) => {
-            let version = core::str::from_utf8(&version).err2anyhow()?;
+            let version = core::str::from_utf8(&version)?;
             if version != v {
                 bail!(
                     "Module was compiled with incompatible version '{}'",
@@ -114,9 +114,7 @@ pub fn check_compatible(engine: &Engine, mmap: &[u8], expected: ObjectKind) -> R
         }
         ModuleVersionStrategy::None => { /* ignore the version info, accept all */ }
     }
-    postcard::from_bytes::<Metadata<'_>>(data)
-        .err2anyhow()?
-        .check_compatible(engine)
+    postcard::from_bytes::<Metadata<'_>>(data)?.check_compatible(engine)
 }
 
 #[cfg(any(feature = "cranelift", feature = "winch"))]
@@ -145,7 +143,7 @@ pub fn append_compiler_info(engine: &Engine, obj: &mut Object<'_>, metadata: &Me
 }
 
 fn detect_precompiled<'data, R: object::ReadRef<'data>>(
-    obj: ElfFile64<'data, NativeEndian, R>,
+    obj: ElfFile64<'data, Endianness, R>,
 ) -> Option<Precompiled> {
     match obj.flags() {
         FileFlags::Elf {
@@ -363,21 +361,22 @@ impl Metadata<'_> {
 
     fn check_tunables(&mut self, other: &Tunables) -> Result<()> {
         let Tunables {
-            static_memory_reservation,
-            static_memory_offset_guard_size,
-            dynamic_memory_offset_guard_size,
+            collector,
+            memory_reservation,
+            memory_guard_size,
             generate_native_debuginfo,
             parse_wasm_debuginfo,
             consume_fuel,
             epoch_interruption,
-            static_memory_bound_is_maximum,
+            memory_may_move,
             guard_before_linear_memory,
             table_lazy_init,
             relaxed_simd_deterministic,
             winch_callable,
             signals_based_traps,
+            memory_init_cow,
             // This doesn't affect compilation, it's just a runtime setting.
-            dynamic_memory_growth_reserve: _,
+            memory_reservation_for_growth: _,
 
             // This does technically affect compilation but modules with/without
             // trap information can be loaded into engines with the opposite
@@ -389,20 +388,16 @@ impl Metadata<'_> {
             debug_adapter_modules: _,
         } = self.tunables;
 
+        Self::check_collector(collector, other.collector)?;
         Self::check_int(
-            static_memory_reservation,
-            other.static_memory_reservation,
-            "static memory reservation",
+            memory_reservation,
+            other.memory_reservation,
+            "memory reservation",
         )?;
         Self::check_int(
-            static_memory_offset_guard_size,
-            other.static_memory_offset_guard_size,
-            "static memory guard size",
-        )?;
-        Self::check_int(
-            dynamic_memory_offset_guard_size,
-            other.dynamic_memory_offset_guard_size,
-            "dynamic memory guard size",
+            memory_guard_size,
+            other.memory_guard_size,
+            "memory guard size",
         )?;
         Self::check_bool(
             generate_native_debuginfo,
@@ -420,11 +415,7 @@ impl Metadata<'_> {
             other.epoch_interruption,
             "epoch interruption",
         )?;
-        Self::check_bool(
-            static_memory_bound_is_maximum,
-            other.static_memory_bound_is_maximum,
-            "pooling allocation support",
-        )?;
+        Self::check_bool(memory_may_move, other.memory_may_move, "memory may move")?;
         Self::check_bool(
             guard_before_linear_memory,
             other.guard_before_linear_memory,
@@ -445,6 +436,11 @@ impl Metadata<'_> {
             signals_based_traps,
             other.signals_based_traps,
             "Signals-based traps",
+        )?;
+        Self::check_bool(
+            memory_init_cow,
+            other.memory_init_cow,
+            "memory initialization with CoW",
         )?;
 
         Ok(())
@@ -591,6 +587,30 @@ impl Metadata<'_> {
 
         Ok(())
     }
+
+    fn check_collector(
+        module: Option<wasmtime_environ::Collector>,
+        host: Option<wasmtime_environ::Collector>,
+    ) -> Result<()> {
+        match (module, host) {
+            (None, None) => Ok(()),
+            (Some(module), Some(host)) if module == host => Ok(()),
+
+            (None, Some(_)) => {
+                bail!("module was compiled without GC but GC is enabled in the host")
+            }
+            (Some(_), None) => {
+                bail!("module was compiled with GC however GC is disabled in the host")
+            }
+
+            (Some(module), Some(host)) => {
+                bail!(
+                    "module was compiled for the {module} collector but \
+                     the host is configured to use the {host} collector",
+                )
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -621,6 +641,8 @@ mod test {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")] // test on a platform that is known to use
+                                   // Cranelift
     fn test_os_mismatch() -> Result<()> {
         let engine = Engine::default();
         let mut metadata = Metadata::new(&engine);
@@ -692,15 +714,16 @@ Caused by:
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    #[cfg(target_pointer_width = "64")] // different defaults on 32-bit platforms
     fn test_tunables_int_mismatch() -> Result<()> {
         let engine = Engine::default();
         let mut metadata = Metadata::new(&engine);
 
-        metadata.tunables.static_memory_offset_guard_size = 0;
+        metadata.tunables.memory_guard_size = 0;
 
         match metadata.check_compatible(&engine) {
             Ok(_) => unreachable!(),
-            Err(e) => assert_eq!(e.to_string(), "Module was compiled with a static memory guard size of '0' but '2147483648' is expected for the host"),
+            Err(e) => assert_eq!(e.to_string(), "Module was compiled with a memory guard size of '0' but '33554432' is expected for the host"),
         }
 
         Ok(())
@@ -742,6 +765,8 @@ Caused by:
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")] // test on a platform that is known to
+                                   // implement threads
     fn test_feature_mismatch() -> Result<()> {
         let mut config = Config::new();
         config.wasm_threads(true);

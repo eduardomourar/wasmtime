@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use arbitrary::{Arbitrary, Unstructured};
-use std::ops::Range;
 use wasmtime::{LinearMemory, MemoryCreator, MemoryType};
 
 /// A description of a memory config, image, etc... that can be used to test
@@ -133,12 +132,11 @@ pub enum MemoryConfig {
 /// Represents a normal memory configuration for Wasmtime with the given
 /// static and dynamic memory sizes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "self-describing fields")]
 pub struct NormalMemoryConfig {
-    pub static_memory_maximum_size: Option<u64>,
-    pub static_memory_guard_size: Option<u64>,
-    pub dynamic_memory_guard_size: Option<u64>,
-    pub dynamic_memory_reserved_for_growth: Option<u64>,
+    pub memory_reservation: Option<u64>,
+    pub memory_guard_size: Option<u64>,
+    pub memory_reservation_for_growth: Option<u64>,
     pub guard_before_linear_memory: bool,
     pub cranelift_enable_heap_access_spectre_mitigations: Option<bool>,
     pub memory_init_cow: bool,
@@ -146,38 +144,66 @@ pub struct NormalMemoryConfig {
 
 impl<'a> Arbitrary<'a> for NormalMemoryConfig {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        // This attempts to limit memory and guard sizes to 32-bit ranges so
-        // we don't exhaust a 64-bit address space easily.
-        let mut ret = Self {
-            static_memory_maximum_size: <Option<u32> as Arbitrary>::arbitrary(u)?.map(Into::into),
-            static_memory_guard_size: <Option<u32> as Arbitrary>::arbitrary(u)?.map(Into::into),
-            dynamic_memory_guard_size: <Option<u32> as Arbitrary>::arbitrary(u)?.map(Into::into),
-            dynamic_memory_reserved_for_growth: <Option<u32> as Arbitrary>::arbitrary(u)?
-                .map(Into::into),
+        Ok(Self {
+            // Allow up to 8GiB reservations of the virtual address space for
+            // the initial memory reservation.
+            memory_reservation: interesting_virtual_memory_size(u, 33)?,
+
+            // Allow up to 4GiB guard page reservations to be made.
+            memory_guard_size: interesting_virtual_memory_size(u, 32)?,
+
+            // Allow up up to 1GiB extra memory to grow into for dynamic
+            // memories.
+            memory_reservation_for_growth: interesting_virtual_memory_size(u, 30)?,
+
             guard_before_linear_memory: u.arbitrary()?,
             cranelift_enable_heap_access_spectre_mitigations: u.arbitrary()?,
             memory_init_cow: u.arbitrary()?,
-        };
-
-        if let Some(dynamic) = ret.dynamic_memory_guard_size {
-            let statik = ret.static_memory_guard_size.unwrap_or(2 << 30);
-            ret.static_memory_guard_size = Some(statik.max(dynamic));
-        }
-
-        Ok(ret)
+        })
     }
+}
+
+/// Helper function to generate "interesting numbers" for virtual memory
+/// configuration options that `Config` supports.
+fn interesting_virtual_memory_size(
+    u: &mut Unstructured<'_>,
+    max_log2: u32,
+) -> arbitrary::Result<Option<u64>> {
+    // Most of the time return "none" meaning "use the default settings".
+    if u.ratio(3, 4)? {
+        return Ok(None);
+    }
+
+    // Otherwise do a split between various strategies.
+    #[derive(Arbitrary)]
+    enum Interesting {
+        Zero,
+        PowerOfTwo,
+        Arbitrary,
+    }
+
+    let size = match u.arbitrary()? {
+        Interesting::Zero => 0,
+        Interesting::PowerOfTwo => 1 << u.int_in_range(0..=max_log2)?,
+        Interesting::Arbitrary => u.int_in_range(0..=1 << max_log2)?,
+    };
+    Ok(Some(size))
 }
 
 impl NormalMemoryConfig {
     /// Apply this memory configuration to the given `wasmtime::Config`.
     pub fn apply_to(&self, config: &mut wasmtime::Config) {
+        if let Some(n) = self.memory_reservation {
+            config.memory_reservation(n);
+        }
+        if let Some(n) = self.memory_guard_size {
+            config.memory_guard_size(n);
+        }
+        if let Some(n) = self.memory_reservation_for_growth {
+            config.memory_reservation_for_growth(n);
+        }
+
         config
-            .static_memory_maximum_size(self.static_memory_maximum_size.unwrap_or(0))
-            .static_memory_guard_size(self.static_memory_guard_size.unwrap_or(0))
-            .dynamic_memory_guard_size(self.dynamic_memory_guard_size.unwrap_or(0))
-            .dynamic_memory_reserved_for_growth(
-                self.dynamic_memory_reserved_for_growth.unwrap_or(0),
-            )
             .guard_before_linear_memory(self.guard_before_linear_memory)
             .memory_init_cow(self.memory_init_cow);
 
@@ -205,7 +231,6 @@ pub struct UnalignedMemory {
     /// This memory is always one byte larger than the actual size of linear
     /// memory.
     src: Vec<u8>,
-    maximum: Option<usize>,
 }
 
 unsafe impl LinearMemory for UnalignedMemory {
@@ -215,8 +240,8 @@ unsafe impl LinearMemory for UnalignedMemory {
         self.src.len() - 1
     }
 
-    fn maximum_byte_size(&self) -> Option<usize> {
-        self.maximum
+    fn byte_capacity(&self) -> usize {
+        self.src.capacity() - 1
     }
 
     fn grow_to(&mut self, new_size: usize) -> Result<()> {
@@ -230,12 +255,6 @@ unsafe impl LinearMemory for UnalignedMemory {
         // of memory is always unaligned.
         self.src[1..].as_ptr() as *mut _
     }
-
-    fn wasm_accessible(&self) -> Range<usize> {
-        let base = self.as_ptr() as usize;
-        let len = self.byte_size();
-        base..base + len
-    }
 }
 
 /// A mechanism to generate [`UnalignedMemory`] at runtime.
@@ -246,7 +265,7 @@ unsafe impl MemoryCreator for UnalignedMemoryCreator {
         &self,
         _ty: MemoryType,
         minimum: usize,
-        maximum: Option<usize>,
+        _maximum: Option<usize>,
         reserved_size_in_bytes: Option<usize>,
         guard_size_in_bytes: usize,
     ) -> Result<Box<dyn LinearMemory>, String> {
@@ -254,7 +273,6 @@ unsafe impl MemoryCreator for UnalignedMemoryCreator {
         assert!(reserved_size_in_bytes.is_none() || reserved_size_in_bytes == Some(0));
         Ok(Box::new(UnalignedMemory {
             src: vec![0; minimum + 1],
-            maximum,
         }))
     }
 }

@@ -2,6 +2,7 @@ use crate::prelude::*;
 use crate::runtime::vm::{self as runtime};
 use crate::store::{AutoAssertNoGc, StoreData, StoreOpaque, Stored};
 use crate::trampoline::generate_table_export;
+use crate::vm::ExportTable;
 use crate::{AnyRef, AsContext, AsContextMut, ExternRef, Func, HeapType, Ref, TableType};
 use core::iter;
 use core::ptr::NonNull;
@@ -110,9 +111,7 @@ impl Table {
         unsafe {
             let table = Table::from_wasmtime_table(wasmtime_export, store);
             let wasmtime_table = table.wasmtime_table(store, iter::empty());
-            (*wasmtime_table)
-                .fill(store.gc_store_mut()?, 0, init, ty.minimum())
-                .err2anyhow()?;
+            (*wasmtime_table).fill(store.optional_gc_store_mut()?, 0, init, ty.minimum())?;
             Ok(table)
         }
     }
@@ -128,7 +127,7 @@ impl Table {
     }
 
     fn _ty(&self, store: &StoreOpaque) -> TableType {
-        let ty = &store[self.0].table.table;
+        let ty = &store[self.0].table;
         TableType::from_wasmtime_table(store.engine(), ty)
     }
 
@@ -138,9 +137,11 @@ impl Table {
         lazy_init_range: impl Iterator<Item = u64>,
     ) -> *mut runtime::Table {
         unsafe {
-            let export = &store[self.0];
-            crate::runtime::vm::Instance::from_vmctx(export.vmctx, |handle| {
-                let idx = handle.table_index(&*export.definition);
+            let ExportTable {
+                vmctx, definition, ..
+            } = store[self.0];
+            crate::runtime::vm::Instance::from_vmctx(vmctx, |handle| {
+                let idx = handle.table_index(&*definition);
                 handle.get_defined_table_with_lazy_init(idx, lazy_init_range)
             })
         }
@@ -156,10 +157,11 @@ impl Table {
     pub fn get(&self, mut store: impl AsContextMut, index: u64) -> Option<Ref> {
         let mut store = AutoAssertNoGc::new(store.as_context_mut().0);
         let table = self.wasmtime_table(&mut store, iter::once(index));
+        let gc_store = store.optional_gc_store_mut().ok().and_then(|s| s);
         unsafe {
-            match (*table).get(store.unwrap_gc_store_mut(), index)? {
+            match (*table).get(gc_store, index)? {
                 runtime::TableElement::FuncRef(f) => {
-                    let func = Func::from_vm_func_ref(&mut store, f);
+                    let func = f.map(|f| Func::from_vm_func_ref(&mut store, f));
                     Some(func.into())
                 }
 
@@ -334,14 +336,13 @@ impl Table {
         let src_table = src_table.wasmtime_table(store, src_range);
         unsafe {
             runtime::Table::copy(
-                store.gc_store_mut()?,
+                store.optional_gc_store_mut()?,
                 dst_table,
                 src_table,
                 dst_index,
                 src_index,
                 len,
-            )
-            .err2anyhow()?;
+            )?;
         }
         Ok(())
     }
@@ -369,9 +370,7 @@ impl Table {
 
         let table = self.wasmtime_table(store, iter::empty());
         unsafe {
-            (*table)
-                .fill(store.gc_store_mut()?, dst, val, len)
-                .err2anyhow()?;
+            (*table).fill(store.optional_gc_store_mut()?, dst, val, len)?;
         }
 
         Ok(())
@@ -405,7 +404,6 @@ impl Table {
         // Ensure that the table's type is engine-level canonicalized.
         wasmtime_export
             .table
-            .table
             .ref_type
             .canonicalize_for_runtime_usage(&mut |module_index| {
                 crate::runtime::vm::Instance::from_vmctx(wasmtime_export.vmctx, |instance| {
@@ -417,7 +415,7 @@ impl Table {
     }
 
     pub(crate) fn wasmtime_ty<'a>(&self, data: &'a StoreData) -> &'a wasmtime_environ::Table {
-        &data[self.0].table.table
+        &data[self.0].table
     }
 
     pub(crate) fn vmimport(&self, store: &StoreOpaque) -> crate::runtime::vm::VMTableImport {
@@ -443,6 +441,7 @@ impl Table {
 mod tests {
     use super::*;
     use crate::{Instance, Module, Store};
+    use wasmtime_environ::TripleExt;
 
     #[test]
     fn hash_key_is_stable_across_duplicate_store_data_entries() -> Result<()> {
@@ -454,7 +453,20 @@ mod tests {
                     (table (export "t") 1 1 externref)
                 )
             "#,
-        )?;
+        );
+        // Expect this test to fail on pulley at this time. When pulley supports
+        // externref this should switch back to using `?` on the constructor
+        // above for all platforms.
+        let module = match module {
+            Ok(module) => {
+                assert!(!store.engine().target().is_pulley());
+                module
+            }
+            Err(e) => {
+                assert!(store.engine().target().is_pulley(), "bad error {e:?}");
+                return Ok(());
+            }
+        };
         let instance = Instance::new(&mut store, &module, &[])?;
 
         // Each time we `get_table`, we call `Table::from_wasmtime` which adds
