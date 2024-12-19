@@ -662,14 +662,16 @@ impl ABIMachineSpec for S390xMachineDeps {
         frame_size: u32,
         guard_size: u32,
     ) {
-        // Number of probes that we need to perform
-        let probe_count = align_to(frame_size, guard_size) / guard_size;
-
         // The stack probe loop currently takes 4 instructions and each unrolled
         // probe takes 2.  Set this to 2 to keep the max size to 4 instructions.
         const PROBE_MAX_UNROLL: u32 = 2;
 
-        if probe_count <= PROBE_MAX_UNROLL {
+        // Calculate how many probes we need to perform. Round down, as we only
+        // need to probe whole guard_size regions we'd otherwise skip over.
+        let probe_count = frame_size / guard_size;
+        if probe_count == 0 {
+            // No probe necessary
+        } else if probe_count <= PROBE_MAX_UNROLL {
             // Unrolled probe loop.
             for _ in 0..probe_count {
                 insts.extend(Self::gen_sp_reg_adjust(-(guard_size as i32)));
@@ -738,14 +740,29 @@ impl ABIMachineSpec for S390xMachineDeps {
         // Use STMG to save clobbered GPRs into save area.
         // Note that we always save SP (%r15) here if anything is saved.
         if let Some((first_clobbered_gpr, _)) = get_clobbered_gprs(frame_layout) {
+            let mut last_clobbered_gpr = 15;
             let offset = 8 * first_clobbered_gpr as i64 + incoming_tail_args_size as i64;
             insts.push(Inst::StoreMultiple64 {
                 rt: gpr(first_clobbered_gpr),
-                rt2: gpr(15),
+                rt2: gpr(last_clobbered_gpr),
                 mem: MemArg::reg_plus_off(stack_reg(), offset, MemFlags::trusted()),
             });
             if flags.unwind_info() {
-                for i in first_clobbered_gpr..16 {
+                // Normally, we instruct the unwinder to restore the stack pointer
+                // from its slot in the save area.  However, if we have incoming
+                // tail-call arguments, the value saved in that slot is incorrect.
+                // In that case, we instead instruct the unwinder to compute the
+                // unwound SP relative to the current CFA, as CFA == SP + 160.
+                if incoming_tail_args_size != 0 {
+                    insts.push(Inst::Unwind {
+                        inst: UnwindInst::RegStackOffset {
+                            clobber_offset: frame_layout.clobber_size,
+                            reg: gpr(last_clobbered_gpr).to_real_reg().unwrap(),
+                        },
+                    });
+                    last_clobbered_gpr = last_clobbered_gpr - 1;
+                }
+                for i in first_clobbered_gpr..(last_clobbered_gpr + 1) {
                     insts.push(Inst::Unwind {
                         inst: UnwindInst::SaveReg {
                             clobber_offset: frame_layout.clobber_size + (i * 8) as u32,

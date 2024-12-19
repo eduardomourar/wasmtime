@@ -26,7 +26,9 @@ use wasmtime_wasi_threads::WasiThreadsCtx;
 #[cfg(feature = "wasi-config")]
 use wasmtime_wasi_config::{WasiConfig, WasiConfigVariables};
 #[cfg(feature = "wasi-http")]
-use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::{
+    WasiHttpCtx, DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS, DEFAULT_OUTGOING_BODY_CHUNK_SIZE,
+};
 #[cfg(feature = "wasi-keyvalue")]
 use wasmtime_wasi_keyvalue::{WasiKeyValue, WasiKeyValueCtx, WasiKeyValueCtxBuilder};
 
@@ -39,7 +41,7 @@ fn parse_preloads(s: &str) -> Result<(String, PathBuf)> {
 }
 
 /// Runs a WebAssembly module
-#[derive(Parser, PartialEq)]
+#[derive(Parser)]
 pub struct RunCommand {
     #[command(flatten)]
     #[allow(missing_docs)]
@@ -87,7 +89,7 @@ impl RunCommand {
     pub fn execute(mut self) -> Result<()> {
         self.run.common.init_logging()?;
 
-        let mut config = self.run.common.config(None, None)?;
+        let mut config = self.run.common.config(None)?;
         config.async_support(true);
 
         if self.run.common.wasm.timeout.is_some() {
@@ -137,7 +139,18 @@ impl RunCommand {
             }
         }
 
-        let host = Host::default();
+        let host = Host {
+            #[cfg(feature = "wasi-http")]
+            wasi_http_outgoing_body_buffer_chunks: self
+                .run
+                .common
+                .wasi
+                .http_outgoing_body_buffer_chunks,
+            #[cfg(feature = "wasi-http")]
+            wasi_http_outgoing_body_chunk_size: self.run.common.wasi.http_outgoing_body_chunk_size,
+            ..Default::default()
+        };
+
         let mut store = Store::new(&engine, host);
         self.populate_with_wasi(&mut linker, &mut store, &main)?;
 
@@ -233,21 +246,19 @@ impl RunCommand {
                     if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
                         std::process::exit(exit.0);
                     }
-                    if e.is::<wasmtime::Trap>() {
-                        eprintln!("Error: {e:?}");
-                        cfg_if::cfg_if! {
-                            if #[cfg(unix)] {
-                                std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
-                            } else if #[cfg(windows)] {
-                                // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/abort?view=vs-2019
-                                std::process::exit(3);
-                            }
+                }
+                if e.is::<wasmtime::Trap>() {
+                    eprintln!("Error: {e:?}");
+                    cfg_if::cfg_if! {
+                        if #[cfg(unix)] {
+                            std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
+                        } else if #[cfg(windows)] {
+                            // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/abort?view=vs-2019
+                            std::process::exit(3);
                         }
                     }
-                    return Err(e);
-                } else {
-                    unreachable!("either preview1_ctx or preview2_ctx present")
                 }
+                return Err(e);
             }
         }
 
@@ -907,6 +918,10 @@ struct Host {
     wasi_threads: Option<Arc<WasiThreadsCtx<Host>>>,
     #[cfg(feature = "wasi-http")]
     wasi_http: Option<Arc<WasiHttpCtx>>,
+    #[cfg(feature = "wasi-http")]
+    wasi_http_outgoing_body_buffer_chunks: Option<usize>,
+    #[cfg(feature = "wasi-http")]
+    wasi_http_outgoing_body_chunk_size: Option<usize>,
     limits: StoreLimits,
     #[cfg(feature = "profiling")]
     guest_profiler: Option<Arc<wasmtime::GuestProfiler>>,
@@ -949,6 +964,16 @@ impl wasmtime_wasi_http::types::WasiHttpView for Host {
 
     fn table(&mut self) -> &mut wasmtime::component::ResourceTable {
         self.preview2_ctx().table()
+    }
+
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        self.wasi_http_outgoing_body_buffer_chunks
+            .unwrap_or_else(|| DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS)
+    }
+
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        self.wasi_http_outgoing_body_chunk_size
+            .unwrap_or_else(|| DEFAULT_OUTGOING_BODY_CHUNK_SIZE)
     }
 }
 

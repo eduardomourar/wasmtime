@@ -123,11 +123,12 @@ impl TargetIsa for Aarch64 {
         );
         let regalloc = RegAlloc::from(gpr, fpr);
         let codegen_context = CodeGenContext::new(regalloc, stack, frame, &vmoffsets);
-        let mut codegen = CodeGen::new(tunables, &mut masm, codegen_context, env, abi_sig);
+        let codegen = CodeGen::new(tunables, &mut masm, codegen_context, env, abi_sig);
 
-        codegen.emit(&mut body, validator)?;
-        let names = codegen.env.take_name_map();
-        let base = codegen.source_location.base;
+        let mut body_codegen = codegen.emit_prologue()?;
+        body_codegen.emit(&mut body, validator)?;
+        let names = body_codegen.env.take_name_map();
+        let base = body_codegen.source_location.base;
         Ok(CompiledFunction::new(
             masm.finalize(base),
             names,
@@ -153,5 +154,22 @@ impl TargetIsa for Aarch64 {
     ) -> Result<Option<cranelift_codegen::isa::unwind::UnwindInfo>> {
         // TODO: should fill this in with an actual implementation
         Ok(None)
+    }
+
+    fn page_size_align_log2(&self) -> u8 {
+        use target_lexicon::*;
+        match self.triple().operating_system {
+            OperatingSystem::MacOSX { .. }
+            | OperatingSystem::Darwin(_)
+            | OperatingSystem::IOS(_)
+            | OperatingSystem::TvOS(_) => {
+                debug_assert_eq!(1 << 14, 0x4000);
+                14
+            }
+            _ => {
+                debug_assert_eq!(1 << 16, 0x10000);
+                16
+            }
+        }
     }
 }

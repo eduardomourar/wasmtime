@@ -152,7 +152,7 @@
 //!   but is conservative.
 //!
 //! - The fixup list can interact with island emission to create
-//!   "quadratic island behvior". In a little more detail, one can hit
+//!   "quadratic island behavior". In a little more detail, one can hit
 //!   this behavior by having some pending fixups (forward label
 //!   references) with long-range label-use kinds, and some others
 //!   with shorter-range references that nonetheless still are pending
@@ -2037,6 +2037,10 @@ impl<I: VCodeInst> TextSectionBuilder for MachTextSectionBuilder<I> {
         self.force_veneers = ForceVeneers::Yes;
     }
 
+    fn write(&mut self, offset: u64, data: &[u8]) {
+        self.buf.data[offset.try_into().unwrap()..][..data.len()].copy_from_slice(data);
+    }
+
     fn finish(&mut self, ctrl_plane: &mut ControlPlane) -> Vec<u8> {
         // Double-check all functions were pushed.
         assert_eq!(self.next_func, self.buf.label_offsets.len());
@@ -2057,7 +2061,7 @@ mod test {
 
     use super::*;
     use crate::ir::UserExternalNameRef;
-    use crate::isa::aarch64::inst::xreg;
+    use crate::isa::aarch64::inst::{xreg, OperandSize};
     use crate::isa::aarch64::inst::{BranchTarget, CondBrKind, EmitInfo, Inst};
     use crate::machinst::{MachInstEmit, MachInstEmitState};
     use crate::settings;
@@ -2096,7 +2100,7 @@ mod test {
 
         buf.bind_label(label(0), state.ctrl_plane_mut());
         let inst = Inst::CondBr {
-            kind: CondBrKind::NotZero(xreg(0)),
+            kind: CondBrKind::NotZero(xreg(0), OperandSize::Size64),
             taken: target(1),
             not_taken: target(2),
         };
@@ -2127,7 +2131,7 @@ mod test {
 
         buf.bind_label(label(0), state.ctrl_plane_mut());
         let inst = Inst::CondBr {
-            kind: CondBrKind::Zero(xreg(0)),
+            kind: CondBrKind::Zero(xreg(0), OperandSize::Size64),
             taken: target(1),
             not_taken: target(2),
         };
@@ -2150,7 +2154,7 @@ mod test {
         let mut buf2 = MachBuffer::new();
         let mut state = Default::default();
         let inst = Inst::TrapIf {
-            kind: CondBrKind::NotZero(xreg(0)),
+            kind: CondBrKind::NotZero(xreg(0), OperandSize::Size64),
             trap_code: TrapCode::STACK_OVERFLOW,
         };
         inst.emit(&mut buf2, &info, &mut state);
@@ -2173,7 +2177,7 @@ mod test {
 
         buf.bind_label(label(0), state.ctrl_plane_mut());
         let inst = Inst::CondBr {
-            kind: CondBrKind::NotZero(xreg(0)),
+            kind: CondBrKind::NotZero(xreg(0), OperandSize::Size64),
             taken: target(2),
             not_taken: target(3),
         };
@@ -2203,7 +2207,7 @@ mod test {
         let mut buf2 = MachBuffer::new();
         let mut state = Default::default();
         let inst = Inst::CondBr {
-            kind: CondBrKind::NotZero(xreg(0)),
+            kind: CondBrKind::NotZero(xreg(0), OperandSize::Size64),
 
             // This conditionally taken branch has a 19-bit constant, shifted
             // to the left by two, giving us a 21-bit range in total. Half of
@@ -2256,7 +2260,7 @@ mod test {
 
         buf.bind_label(label(3), state.ctrl_plane_mut());
         let inst = Inst::CondBr {
-            kind: CondBrKind::NotZero(xreg(0)),
+            kind: CondBrKind::NotZero(xreg(0), OperandSize::Size64),
             taken: target(0),
             not_taken: target(1),
         };
@@ -2269,7 +2273,7 @@ mod test {
         let mut buf2 = MachBuffer::new();
         let mut state = Default::default();
         let inst = Inst::CondBr {
-            kind: CondBrKind::NotZero(xreg(0)),
+            kind: CondBrKind::NotZero(xreg(0), OperandSize::Size64),
             taken: BranchTarget::ResolvedOffset(8),
             not_taken: BranchTarget::ResolvedOffset(4 - (2000000 + 4)),
         };
@@ -2328,7 +2332,7 @@ mod test {
 
         buf.bind_label(label(0), state.ctrl_plane_mut());
         let inst = Inst::CondBr {
-            kind: CondBrKind::Zero(xreg(0)),
+            kind: CondBrKind::Zero(xreg(0), OperandSize::Size64),
             taken: target(1),
             not_taken: target(2),
         };

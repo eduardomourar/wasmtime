@@ -5,7 +5,7 @@
 //! machine code emitter.
 
 use crate::abi::RetArea;
-use crate::codegen::{control_index, Callee, CodeGen, ControlStackFrame, FnCall};
+use crate::codegen::{control_index, Callee, CodeGen, ControlStackFrame, Emission, FnCall};
 use crate::masm::{
     DivKind, ExtendKind, FloatCmpKind, IntCmpKind, MacroAssembler, MemMoveDirection, MulWideKind,
     OperandSize, RegImm, RemKind, RoundingMode, SPOffset, ShiftKind, TruncKind,
@@ -14,11 +14,13 @@ use crate::reg::{writable, Reg};
 use crate::stack::{TypedReg, Val};
 use regalloc2::RegClass;
 use smallvec::SmallVec;
-use wasmparser::{BlockType, BrTable, Ieee32, Ieee64, MemArg, VisitOperator, V128};
+use wasmparser::{
+    BlockType, BrTable, Ieee32, Ieee64, MemArg, VisitOperator, VisitSimdOperator, V128,
+};
 use wasmtime_cranelift::TRAP_INDIRECT_CALL_TO_NULL;
 use wasmtime_environ::{
-    FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TableStyle, TypeIndex, WasmHeapType,
-    WasmValType, FUNCREF_INIT_BIT,
+    FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TypeIndex, WasmHeapType, WasmValType,
+    FUNCREF_INIT_BIT,
 };
 
 /// A macro to define unsupported WebAssembly operators.
@@ -251,7 +253,7 @@ macro_rules! def_unsupported {
     (emit $unsupported:tt $($rest:tt)*) => {$($rest)*};
 }
 
-impl<'a, 'translation, 'data, M> VisitOperator<'a> for CodeGen<'a, 'translation, 'data, M>
+impl<'a, 'translation, 'data, M> VisitOperator<'a> for CodeGen<'a, 'translation, 'data, M, Emission>
 where
     M: MacroAssembler,
 {
@@ -271,10 +273,6 @@ where
 
     fn visit_f64_const(&mut self, val: Ieee64) {
         self.context.stack.push(Val::f64(val));
-    }
-
-    fn visit_v128_const(&mut self, val: V128) {
-        self.context.stack.push(Val::v128(val.i128()))
     }
 
     fn visit_f32_add(&mut self) {
@@ -1405,15 +1403,10 @@ where
         // Perform the indirect call.
         // This code assumes that [`Self::emit_lazy_init_funcref`] will
         // push the funcref to the value stack.
-        match self.env.translation.module.table_plans[table_index].style {
-            TableStyle::CallerChecksSignature { lazy_init: true } => {
-                let funcref_ptr = self.context.stack.peek().map(|v| v.unwrap_reg()).unwrap();
-                self.masm
-                    .trapz(funcref_ptr.into(), TRAP_INDIRECT_CALL_TO_NULL);
-                self.emit_typecheck_funcref(funcref_ptr.into(), type_index);
-            }
-            _ => unimplemented!("Support for eager table init"),
-        }
+        let funcref_ptr = self.context.stack.peek().map(|v| v.unwrap_reg()).unwrap();
+        self.masm
+            .trapz(funcref_ptr.into(), TRAP_INDIRECT_CALL_TO_NULL);
+        self.emit_typecheck_funcref(funcref_ptr.into(), type_index);
 
         let callee = self.env.funcref(type_index);
         FnCall::emit::<M>(&mut self.env, self.masm, &mut self.context, callee)
@@ -1433,7 +1426,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin.clone()),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_table_copy(&mut self, dst: u32, src: u32) {
@@ -1449,22 +1443,17 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_table_get(&mut self, table: u32) {
         let table_index = TableIndex::from_u32(table);
-        let plan = self.env.table_plan(table_index);
-        let heap_type = plan.table.ref_type.heap_type;
-        let style = &plan.style;
+        let table = self.env.table(table_index);
+        let heap_type = table.ref_type.heap_type;
 
         match heap_type {
-            WasmHeapType::Func => match style {
-                TableStyle::CallerChecksSignature { lazy_init: true } => {
-                    self.emit_lazy_init_funcref(table_index)
-                }
-                _ => unimplemented!("Support for eager table init"),
-            },
+            WasmHeapType::Func => self.emit_lazy_init_funcref(table_index),
             WasmHeapType::Extern => {
                 self.found_unsupported_instruction =
                     Some("unsupported table.get of externref table");
@@ -1477,8 +1466,8 @@ where
 
     fn visit_table_grow(&mut self, table: u32) {
         let table_index = TableIndex::from_u32(table);
-        let table_plan = self.env.table_plan(table_index);
-        let builtin = match table_plan.table.ref_type.heap_type {
+        let table_ty = self.env.table(table_index);
+        let builtin = match table_ty.ref_type.heap_type {
             WasmHeapType::Func => self.env.builtins.table_grow_func_ref::<M::ABI, M::Ptr>(),
             ty => unimplemented!("Support for HeapType: {ty}"),
         };
@@ -1504,7 +1493,7 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin.clone()),
-        )
+        );
     }
 
     fn visit_table_size(&mut self, table: u32) {
@@ -1515,8 +1504,8 @@ where
 
     fn visit_table_fill(&mut self, table: u32) {
         let table_index = TableIndex::from_u32(table);
-        let table_plan = self.env.table_plan(table_index);
-        let builtin = match table_plan.table.ref_type.heap_type {
+        let table_ty = self.env.table(table_index);
+        let builtin = match table_ty.ref_type.heap_type {
             WasmHeapType::Func => self.env.builtins.table_fill_func_ref::<M::ABI, M::Ptr>(),
             ty => unimplemented!("Support for heap type: {ty}"),
         };
@@ -1532,38 +1521,39 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin.clone()),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_table_set(&mut self, table: u32) {
         let ptr_type = self.env.ptr_type();
         let table_index = TableIndex::from_u32(table);
         let table_data = self.env.resolve_table_data(table_index);
-        let plan = self.env.table_plan(table_index);
-        match plan.table.ref_type.heap_type {
-            WasmHeapType::Func => match plan.style {
-                TableStyle::CallerChecksSignature { lazy_init: true } => {
-                    let value = self.context.pop_to_reg(self.masm, None);
-                    let index = self.context.pop_to_reg(self.masm, None);
-                    let base = self.context.any_gpr(self.masm);
-                    let elem_addr =
-                        self.emit_compute_table_elem_addr(index.into(), base, &table_data);
-                    // Set the initialized bit.
-                    self.masm.or(
-                        writable!(value.into()),
-                        value.into(),
-                        RegImm::i64(FUNCREF_INIT_BIT as i64),
-                        ptr_type.into(),
-                    );
+        let table = self.env.table(table_index);
+        match table.ref_type.heap_type {
+            WasmHeapType::Func => {
+                assert!(
+                    self.tunables.table_lazy_init,
+                    "unsupported table eager init"
+                );
+                let value = self.context.pop_to_reg(self.masm, None);
+                let index = self.context.pop_to_reg(self.masm, None);
+                let base = self.context.any_gpr(self.masm);
+                let elem_addr = self.emit_compute_table_elem_addr(index.into(), base, &table_data);
+                // Set the initialized bit.
+                self.masm.or(
+                    writable!(value.into()),
+                    value.into(),
+                    RegImm::i64(FUNCREF_INIT_BIT as i64),
+                    ptr_type.into(),
+                );
 
-                    self.masm.store_ptr(value.into(), elem_addr);
+                self.masm.store_ptr(value.into(), elem_addr);
 
-                    self.context.free_reg(value);
-                    self.context.free_reg(index);
-                    self.context.free_reg(base);
-                }
-                _ => unimplemented!("Support for eager table init"),
-            },
+                self.context.free_reg(value);
+                self.context.free_reg(index);
+                self.context.free_reg(base);
+            }
             ty => unimplemented!("Support for WasmHeapType: {ty}"),
         };
     }
@@ -1592,7 +1582,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_memory_copy(&mut self, dst_mem: u32, src_mem: u32) {
@@ -1620,7 +1611,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_memory_fill(&mut self, mem: u32) {
@@ -1637,7 +1629,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_memory_size(&mut self, mem: u32) {
@@ -1664,7 +1657,7 @@ where
         // The memory32_grow builtin returns a pointer type, therefore we must
         // ensure that the return type is representative of the address space of
         // the heap type.
-        match (self.env.ptr_type(), heap.ty) {
+        match (self.env.ptr_type(), heap.index_type()) {
             (WasmValType::I64, WasmValType::I64) => {}
             // When the heap type is smaller than the pointer type, we adjust
             // the result of the memory32_grow builtin.
@@ -1726,10 +1719,8 @@ where
             &mut self.context,
         ));
 
-        // Emit fuel check right after binding the loop header.
-        if self.tunables.consume_fuel {
-            self.emit_fuel_check();
-        }
+        self.maybe_emit_epoch_check();
+        self.maybe_emit_fuel_check();
     }
 
     fn visit_br(&mut self, depth: u32) {
@@ -2068,14 +2059,6 @@ where
         self.emit_wasm_store(&memarg, OperandSize::S64)
     }
 
-    fn visit_v128_load(&mut self, memarg: MemArg) {
-        self.emit_wasm_load(&memarg, WasmValType::V128, OperandSize::S128, None)
-    }
-
-    fn visit_v128_store(&mut self, memarg: MemArg) {
-        self.emit_wasm_store(&memarg, OperandSize::S128)
-    }
-
     fn visit_i32_trunc_sat_f32_s(&mut self) {
         use OperandSize::*;
 
@@ -2230,10 +2213,30 @@ where
         self.masm.mul_wide(&mut self.context, MulWideKind::Unsigned);
     }
 
-    wasmparser::for_each_operator!(def_unsupported);
+    wasmparser::for_each_visit_operator!(def_unsupported);
 }
 
-impl<'a, 'translation, 'data, M> CodeGen<'a, 'translation, 'data, M>
+impl<'a, 'translation, 'data, M> VisitSimdOperator<'a>
+    for CodeGen<'a, 'translation, 'data, M, Emission>
+where
+    M: MacroAssembler,
+{
+    fn visit_v128_const(&mut self, val: V128) {
+        self.context.stack.push(Val::v128(val.i128()))
+    }
+
+    fn visit_v128_load(&mut self, memarg: MemArg) {
+        self.emit_wasm_load(&memarg, WasmValType::V128, OperandSize::S128, None)
+    }
+
+    fn visit_v128_store(&mut self, memarg: MemArg) {
+        self.emit_wasm_store(&memarg, OperandSize::S128)
+    }
+
+    wasmparser::for_each_visit_simd_operator!(def_unsupported);
+}
+
+impl<'a, 'translation, 'data, M> CodeGen<'a, 'translation, 'data, M, Emission>
 where
     M: MacroAssembler,
 {

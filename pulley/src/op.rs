@@ -1,5 +1,7 @@
 //! Pulley bytecode operations with their operands.
 
+#[cfg(feature = "encode")]
+use crate::encode::Encode;
 use crate::imms::*;
 use crate::regs::*;
 
@@ -67,7 +69,7 @@ macro_rules! define_extended_op {
         /// An extended operation/instruction.
         ///
         /// These tend to be colder than `Op`s.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
         pub enum ExtendedOp {
             $(
@@ -78,7 +80,7 @@ macro_rules! define_extended_op {
 
         $(
             $( #[$attr] )*
-            #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
             #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
             pub struct $name { $(
                 $(
@@ -128,6 +130,17 @@ macro_rules! define_op_encode {
                     Self::ExtendedOp(op) => op.encode(into),
                 }
             }
+
+            /// Returns the encoded size of this op.
+            #[cfg(feature = "encode")]
+            pub fn width(&self) -> u8 {
+                match self {
+                    $(
+                        Self::$name(_) => <$name as Encode>::WIDTH,
+                    )*
+                    Self::ExtendedOp(op) => op.width(),
+                }
+            }
         }
 
         $(
@@ -165,6 +178,16 @@ macro_rules! define_extended_op_encode {
                 match self {
                     $(
                         Self::$name(op) => op.encode(into),
+                    )*
+                }
+            }
+
+            /// Returns the encoded size of this op.
+            #[cfg(feature = "encode")]
+            pub fn width(&self) -> u8 {
+                match self {
+                    $(
+                        Self::$name(_) => <$name as Encode>::WIDTH,
                     )*
                 }
             }

@@ -216,6 +216,7 @@
 #![deny(missing_docs)]
 #![doc(test(attr(deny(warnings))))]
 #![doc(test(attr(allow(dead_code, unused_variables, unused_mut))))]
+#![expect(clippy::allow_attributes_without_reason, reason = "crate not migrated")]
 
 mod error;
 mod http_impl;
@@ -231,7 +232,10 @@ pub use crate::error::{
     http_request_error, hyper_request_error, hyper_response_error, HttpError, HttpResult,
 };
 #[doc(inline)]
-pub use crate::types::{WasiHttpCtx, WasiHttpImpl, WasiHttpView};
+pub use crate::types::{
+    WasiHttpCtx, WasiHttpImpl, WasiHttpView, DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS,
+    DEFAULT_OUTGOING_BODY_CHUNK_SIZE,
+};
 
 /// Add all of the `wasi:http/proxy` world's interfaces to a [`wasmtime::component::Linker`].
 ///

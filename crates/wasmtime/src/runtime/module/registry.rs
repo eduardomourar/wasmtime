@@ -299,6 +299,7 @@ pub fn unregister_code(code: &Arc<CodeMemory>) {
 #[cfg_attr(miri, ignore)]
 fn test_frame_info() -> Result<(), anyhow::Error> {
     use crate::*;
+
     let mut store = Store::<()>::default();
     let module = Module::new(
         store.engine(),

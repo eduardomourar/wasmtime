@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use tempfile::{NamedTempFile, TempDir};
 
 // Run the wasmtime CLI with the provided args and return the `Output`.
@@ -58,7 +58,7 @@ fn get_wasmtime_path() -> Result<PathBuf> {
 
 // Run the wasmtime CLI with the provided args and, if it succeeds, return
 // the standard output in a `String`.
-fn run_wasmtime(args: &[&str]) -> Result<String> {
+pub fn run_wasmtime(args: &[&str]) -> Result<String> {
     let output = run_wasmtime_for_output(args, None)?;
     if !output.status.success() {
         bail!(
@@ -174,10 +174,13 @@ fn run_wasmtime_unreachable_wat() -> Result<()> {
 
     assert_ne!(output.stderr, b"");
     assert_eq!(output.stdout, b"");
-    assert!(!output.status.success());
 
-    let code = output
-        .status
+    assert_trap_code(&output.status);
+    Ok(())
+}
+
+fn assert_trap_code(status: &ExitStatus) {
+    let code = status
         .code()
         .expect("wasmtime process should exit normally");
 
@@ -186,7 +189,6 @@ fn run_wasmtime_unreachable_wat() -> Result<()> {
     assert_eq!(code, 128 + libc::SIGABRT);
     #[cfg(windows)]
     assert_eq!(code, 3);
-    Ok(())
 }
 
 // Run a simple WASI hello world, snapshot0 edition.
@@ -1712,6 +1714,30 @@ mod test_programs {
     }
 
     #[tokio::test]
+    async fn cli_serve_outgoing_body_config() -> Result<()> {
+        let server = WasmtimeServe::new(CLI_SERVE_ECHO_ENV_COMPONENT, |cmd| {
+            cmd.arg("-Scli");
+            cmd.arg("-Shttp-outgoing-body-buffer-chunks=2");
+            cmd.arg("-Shttp-outgoing-body-chunk-size=1024");
+        })?;
+
+        let resp = server
+            .send_request(
+                hyper::Request::builder()
+                    .uri("http://localhost/")
+                    .header("env", "FOO")
+                    .body(String::new())
+                    .context("failed to make request")?,
+            )
+            .await?;
+
+        assert!(resp.status().is_success());
+
+        server.finish()?;
+        Ok(())
+    }
+
+    #[tokio::test]
     #[ignore] // TODO: printing stderr in the child and killing the child at the
               // end of this test race so the stderr may be present or not. Need
               // to implement a more graceful shutdown routine for `wasmtime
@@ -1884,6 +1910,52 @@ stderr [1] :: after empty
     }
 
     #[tokio::test]
+    async fn cli_serve_with_print_no_prefix() -> Result<()> {
+        let server = WasmtimeServe::new(CLI_SERVE_WITH_PRINT_COMPONENT, |cmd| {
+            cmd.arg("-Scli");
+            cmd.arg("--no-logging-prefix");
+        })?;
+
+        for _ in 0..2 {
+            let resp = server
+                .send_request(
+                    hyper::Request::builder()
+                        .uri("http://localhost/")
+                        .body(String::new())
+                        .context("failed to make request")?,
+                )
+                .await?;
+            assert!(resp.status().is_success());
+        }
+
+        let (out, err) = server.finish()?;
+        assert_eq!(
+            out,
+            "\
+this is half a print to stdout
+\n\
+after empty
+this is half a print to stdout
+\n\
+after empty
+"
+        );
+        assert_eq!(
+            err,
+            "\
+this is half a print to stderr
+\n\
+after empty
+this is half a print to stderr
+\n\
+after empty
+"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cli_serve_authority_and_scheme() -> Result<()> {
         let server = WasmtimeServe::new(CLI_SERVE_AUTHORITY_AND_SCHEME_COMPONENT, |cmd| {
             cmd.arg("-Scli");
@@ -2034,4 +2106,21 @@ fn profile_with_vtune() -> Result<()> {
 #[cfg(target_arch = "x86_64")]
 fn is_vtune_available() -> bool {
     Command::new("vtune").arg("-version").output().is_ok()
+}
+
+#[test]
+fn unreachable_without_wasi() -> Result<()> {
+    let output = run_wasmtime_for_output(
+        &[
+            "-Scli=n",
+            "-Ccache=n",
+            "tests/all/cli_tests/unreachable.wat",
+        ],
+        None,
+    )?;
+
+    assert_ne!(output.stderr, b"");
+    assert_eq!(output.stdout, b"");
+    assert_trap_code(&output.status);
+    Ok(())
 }
