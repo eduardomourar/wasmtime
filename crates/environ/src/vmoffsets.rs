@@ -4,6 +4,8 @@
 // Currently the `VMContext` allocation by field looks like this:
 //
 // struct VMContext {
+//      // Fixed-width data comes first so the calculation of the offset of
+//      // these fields is a compile-time constant when using `HostPtr`.
 //      magic: u32,
 //      _padding: u32, // (On 64-bit systems)
 //      runtime_limits: *const VMRuntimeLimits,
@@ -15,13 +17,20 @@
 //      gc_heap_data: *mut T, // Collector-specific pointer
 //      store: *mut dyn Store,
 //      type_ids: *const VMSharedTypeIndex,
-//      imported_functions: [VMFunctionImport; module.num_imported_functions],
-//      imported_tables: [VMTableImport; module.num_imported_tables],
+//
+//      // Variable-width fields come after the fixed-width fields above. Place
+//      // memory-related items first as they're some of the most frequently
+//      // accessed items and minimizing their offset in this structure can
+//      // shrink the size of load/store instruction offset immediates on
+//      // platforms like x64 and Pulley (e.g. fit in an 8-bit offset instead
+//      // of needing a 32-bit offset)
 //      imported_memories: [VMMemoryImport; module.num_imported_memories],
-//      imported_globals: [VMGlobalImport; module.num_imported_globals],
-//      tables: [VMTableDefinition; module.num_defined_tables],
 //      memories: [*mut VMMemoryDefinition; module.num_defined_memories],
 //      owned_memories: [VMMemoryDefinition; module.num_owned_memories],
+//      imported_functions: [VMFunctionImport; module.num_imported_functions],
+//      imported_tables: [VMTableImport; module.num_imported_tables],
+//      imported_globals: [VMGlobalImport; module.num_imported_globals],
+//      tables: [VMTableDefinition; module.num_defined_tables],
 //      globals: [VMGlobalDefinition; module.num_defined_globals],
 //      func_refs: [VMFuncRef; module.num_escaped_funcs],
 // }
@@ -144,27 +153,27 @@ pub trait PtrSize {
 
     // Offsets within `VMRuntimeLimits`
 
-    /// Return the offset of the `stack_limit` field of `VMRuntimeLimits`
-    #[inline]
-    fn vmruntime_limits_stack_limit(&self) -> u8 {
-        0
-    }
-
     /// Return the offset of the `fuel_consumed` field of `VMRuntimeLimits`
     #[inline]
     fn vmruntime_limits_fuel_consumed(&self) -> u8 {
-        self.size()
+        0
     }
 
     /// Return the offset of the `epoch_deadline` field of `VMRuntimeLimits`
     #[inline]
     fn vmruntime_limits_epoch_deadline(&self) -> u8 {
-        self.vmruntime_limits_fuel_consumed() + 8 // `stack_limit` is a pointer; `fuel_consumed` is an `i64`
+        self.vmruntime_limits_fuel_consumed() + 8
+    }
+
+    /// Return the offset of the `stack_limit` field of `VMRuntimeLimits`
+    #[inline]
+    fn vmruntime_limits_stack_limit(&self) -> u8 {
+        self.vmruntime_limits_epoch_deadline() + 8
     }
 
     /// Return the offset of the `last_wasm_exit_fp` field of `VMRuntimeLimits`.
     fn vmruntime_limits_last_wasm_exit_fp(&self) -> u8 {
-        self.vmruntime_limits_epoch_deadline() + 8
+        self.vmruntime_limits_stack_limit() + self.size()
     }
 
     /// Return the offset of the `last_wasm_exit_pc` field of `VMRuntimeLimits`.
@@ -338,10 +347,10 @@ impl<P: PtrSize> VMOffsets<P> {
     /// Return a new `VMOffsets` instance, for a given pointer size.
     pub fn new(ptr: P, module: &Module) -> Self {
         let num_owned_memories = module
-            .memory_plans
+            .memories
             .iter()
             .skip(module.num_imported_memories)
-            .filter(|p| !p.1.memory.shared)
+            .filter(|p| !p.1.shared)
             .count()
             .try_into()
             .unwrap();
@@ -351,10 +360,8 @@ impl<P: PtrSize> VMOffsets<P> {
             num_imported_tables: cast_to_u32(module.num_imported_tables),
             num_imported_memories: cast_to_u32(module.num_imported_memories),
             num_imported_globals: cast_to_u32(module.num_imported_globals),
-            num_defined_tables: cast_to_u32(module.table_plans.len() - module.num_imported_tables),
-            num_defined_memories: cast_to_u32(
-                module.memory_plans.len() - module.num_imported_memories,
-            ),
+            num_defined_tables: cast_to_u32(module.num_defined_tables()),
+            num_defined_memories: cast_to_u32(module.num_defined_memories()),
             num_owned_memories,
             num_defined_globals: cast_to_u32(module.globals.len() - module.num_imported_globals),
             num_escaped_funcs: cast_to_u32(module.num_escaped_funcs),
@@ -417,13 +424,13 @@ impl<P: PtrSize> VMOffsets<P> {
         calculate_sizes! {
             defined_func_refs: "module functions",
             defined_globals: "defined globals",
-            owned_memories: "owned memories",
-            defined_memories: "defined memories",
             defined_tables: "defined tables",
             imported_globals: "imported globals",
-            imported_memories: "imported memories",
             imported_tables: "imported tables",
             imported_functions: "imported functions",
+            owned_memories: "owned memories",
+            defined_memories: "defined memories",
+            imported_memories: "imported memories",
         }
     }
 }
@@ -483,20 +490,20 @@ impl<P: PtrSize> From<VMOffsetsFields<P>> for VMOffsets<P> {
         }
 
         fields! {
-            size(imported_functions)
-                = cmul(ret.num_imported_functions, ret.size_of_vmfunction_import()),
-            size(imported_tables)
-                = cmul(ret.num_imported_tables, ret.size_of_vmtable_import()),
             size(imported_memories)
                 = cmul(ret.num_imported_memories, ret.size_of_vmmemory_import()),
-            size(imported_globals)
-                = cmul(ret.num_imported_globals, ret.size_of_vmglobal_import()),
-            size(defined_tables)
-                = cmul(ret.num_defined_tables, ret.size_of_vmtable_definition()),
             size(defined_memories)
                 = cmul(ret.num_defined_memories, ret.ptr.size_of_vmmemory_pointer()),
             size(owned_memories)
                 = cmul(ret.num_owned_memories, ret.ptr.size_of_vmmemory_definition()),
+            size(imported_functions)
+                = cmul(ret.num_imported_functions, ret.size_of_vmfunction_import()),
+            size(imported_tables)
+                = cmul(ret.num_imported_tables, ret.size_of_vmtable_import()),
+            size(imported_globals)
+                = cmul(ret.num_imported_globals, ret.size_of_vmglobal_import()),
+            size(defined_tables)
+                = cmul(ret.num_defined_tables, ret.size_of_vmtable_definition()),
             align(16),
             size(defined_globals)
                 = cmul(ret.num_defined_globals, ret.ptr.size_of_vmglobal_definition()),

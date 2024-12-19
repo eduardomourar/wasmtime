@@ -24,28 +24,94 @@ pub use self::emit::*;
 // Instructions (top level): definition
 
 pub use crate::isa::pulley_shared::lower::isle::generated_code::MInst as Inst;
+pub use crate::isa::pulley_shared::lower::isle::generated_code::RawInst;
+pub use crate::isa::pulley_shared::lower::isle::generated_code::VExtKind;
+
+impl From<RawInst> for Inst {
+    fn from(raw: RawInst) -> Inst {
+        Inst::Raw { raw }
+    }
+}
 
 use super::PulleyTargetKind;
+
+mod generated {
+    use super::*;
+    use crate::isa::pulley_shared::lower::isle::generated_code::RawInst;
+
+    include!(concat!(env!("OUT_DIR"), "/pulley_inst_gen.rs"));
+}
+
+/// Out-of-line data for return-calls, to keep the size of `Inst` down.
+#[derive(Clone, Debug)]
+pub struct ReturnCallInfo<T> {
+    /// Where this call is going.
+    pub dest: T,
+
+    /// The size of the argument area for this return-call, potentially smaller
+    /// than that of the caller, but never larger.
+    pub new_stack_arg_size: u32,
+
+    /// The in-register arguments and their constraints.
+    pub uses: CallArgList,
+}
 
 impl Inst {
     /// Generic constructor for a load (zero-extending where appropriate).
     pub fn gen_load(dst: Writable<Reg>, mem: Amode, ty: Type, flags: MemFlags) -> Inst {
-        Inst::Load {
-            dst,
-            mem,
-            ty,
-            flags,
-            ext: ExtKind::Zero,
+        if ty.is_vector() {
+            assert_eq!(ty.bytes(), 16);
+            Inst::VLoad {
+                dst: dst.map(|r| VReg::new(r).unwrap()),
+                mem,
+                ty,
+                flags,
+                ext: VExtKind::None,
+            }
+        } else if ty.is_int() {
+            assert!(ty.bytes() <= 8);
+            Inst::XLoad {
+                dst: dst.map(|r| XReg::new(r).unwrap()),
+                mem,
+                ty,
+                flags,
+                ext: ExtKind::None,
+            }
+        } else {
+            Inst::FLoad {
+                dst: dst.map(|r| FReg::new(r).unwrap()),
+                mem,
+                ty,
+                flags,
+            }
         }
     }
 
     /// Generic constructor for a store.
     pub fn gen_store(mem: Amode, from_reg: Reg, ty: Type, flags: MemFlags) -> Inst {
-        Inst::Store {
-            mem,
-            src: from_reg,
-            ty,
-            flags,
+        if ty.is_vector() {
+            assert_eq!(ty.bytes(), 16);
+            Inst::VStore {
+                mem,
+                src: VReg::new(from_reg).unwrap(),
+                ty,
+                flags,
+            }
+        } else if ty.is_int() {
+            assert!(ty.bytes() <= 8);
+            Inst::XStore {
+                mem,
+                src: XReg::new(from_reg).unwrap(),
+                ty,
+                flags,
+            }
+        } else {
+            Inst::FStore {
+                mem,
+                src: FReg::new(from_reg).unwrap(),
+                ty,
+                flags,
+            }
         }
     }
 }
@@ -62,25 +128,19 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 collector.reg_fixed_use(vreg, *preg);
             }
         }
-        Inst::Ret => {
-            unreachable!("`ret` is only added after regalloc")
+
+        Inst::Nop => {}
+
+        Inst::TrapIf { cond, code: _ } => {
+            cond.get_operands(collector);
         }
 
-        Inst::Unwind { .. } | Inst::Trap { .. } | Inst::Nop => {}
-
-        Inst::TrapIf {
-            cond: _,
-            size: _,
-            src1,
-            src2,
-            code: _,
-        } => {
-            collector.reg_use(src1);
-            collector.reg_use(src2);
-        }
-
-        Inst::GetSp { dst } => {
+        Inst::GetSpecial { dst, reg } => {
             collector.reg_def(dst);
+            // Note that this is explicitly ignored as this is only used for
+            // special registers that don't participate in register allocation
+            // such as the stack pointer, frame pointer, etc.
+            assert!(reg.is_special());
         }
 
         Inst::LoadExtName {
@@ -91,7 +151,7 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_def(dst);
         }
 
-        Inst::Call { info } => {
+        Inst::Call { info } | Inst::IndirectCallHost { info } => {
             let CallInfo { uses, defs, .. } = &mut **info;
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
@@ -112,94 +172,27 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             }
             collector.reg_clobbers(info.clobbers);
         }
+        Inst::ReturnCall { info } => {
+            for CallArgPair { vreg, preg } in &mut info.uses {
+                collector.reg_fixed_use(vreg, *preg);
+            }
+        }
+        Inst::ReturnIndirectCall { info } => {
+            collector.reg_use(&mut info.dest);
+
+            for CallArgPair { vreg, preg } in &mut info.uses {
+                collector.reg_fixed_use(vreg, *preg);
+            }
+        }
 
         Inst::Jump { .. } => {}
 
         Inst::BrIf {
-            c,
+            cond,
             taken: _,
             not_taken: _,
         } => {
-            collector.reg_use(c);
-        }
-
-        Inst::BrIfXeq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXneq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXslt32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXslteq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXult32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXulteq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        } => {
-            collector.reg_use(src1);
-            collector.reg_use(src2);
-        }
-
-        Inst::Xmov { dst, src } => {
-            collector.reg_use(src);
-            collector.reg_def(dst);
-        }
-        Inst::Fmov { dst, src } => {
-            collector.reg_use(src);
-            collector.reg_def(dst);
-        }
-        Inst::Vmov { dst, src } => {
-            collector.reg_use(src);
-            collector.reg_def(dst);
-        }
-
-        Inst::Xconst8 { dst, imm: _ }
-        | Inst::Xconst16 { dst, imm: _ }
-        | Inst::Xconst32 { dst, imm: _ }
-        | Inst::Xconst64 { dst, imm: _ } => {
-            collector.reg_def(dst);
-        }
-
-        Inst::Xadd32 { dst, src1, src2 }
-        | Inst::Xadd64 { dst, src1, src2 }
-        | Inst::Xeq64 { dst, src1, src2 }
-        | Inst::Xneq64 { dst, src1, src2 }
-        | Inst::Xslt64 { dst, src1, src2 }
-        | Inst::Xslteq64 { dst, src1, src2 }
-        | Inst::Xult64 { dst, src1, src2 }
-        | Inst::Xulteq64 { dst, src1, src2 }
-        | Inst::Xeq32 { dst, src1, src2 }
-        | Inst::Xneq32 { dst, src1, src2 }
-        | Inst::Xslt32 { dst, src1, src2 }
-        | Inst::Xslteq32 { dst, src1, src2 }
-        | Inst::Xult32 { dst, src1, src2 }
-        | Inst::Xulteq32 { dst, src1, src2 } => {
-            collector.reg_use(src1);
-            collector.reg_use(src2);
-            collector.reg_def(dst);
+            cond.get_operands(collector);
         }
 
         Inst::LoadAddr { dst, mem } => {
@@ -207,7 +200,7 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             mem.get_operands(collector);
         }
 
-        Inst::Load {
+        Inst::XLoad {
             dst,
             mem,
             ty: _,
@@ -218,7 +211,7 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             mem.get_operands(collector);
         }
 
-        Inst::Store {
+        Inst::XStore {
             mem,
             src,
             ty: _,
@@ -228,22 +221,52 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(src);
         }
 
-        Inst::BitcastIntFromFloat32 { dst, src } => {
-            collector.reg_use(src);
+        Inst::FLoad {
+            dst,
+            mem,
+            ty: _,
+            flags: _,
+        } => {
             collector.reg_def(dst);
+            mem.get_operands(collector);
         }
-        Inst::BitcastIntFromFloat64 { dst, src } => {
+
+        Inst::FStore {
+            mem,
+            src,
+            ty: _,
+            flags: _,
+        } => {
+            mem.get_operands(collector);
             collector.reg_use(src);
-            collector.reg_def(dst);
         }
-        Inst::BitcastFloatFromInt32 { dst, src } => {
+
+        Inst::VLoad {
+            dst,
+            mem,
+            ty: _,
+            flags: _,
+            ext: _,
+        } => {
+            collector.reg_def(dst);
+            mem.get_operands(collector);
+        }
+
+        Inst::VStore {
+            mem,
+            src,
+            ty: _,
+            flags: _,
+        } => {
+            mem.get_operands(collector);
             collector.reg_use(src);
-            collector.reg_def(dst);
         }
-        Inst::BitcastFloatFromInt64 { dst, src } => {
-            collector.reg_use(src);
-            collector.reg_def(dst);
+
+        Inst::BrTable { idx, .. } => {
+            collector.reg_use(idx);
         }
+
+        Inst::Raw { raw } => generated::get_operands(raw, collector),
     }
 }
 
@@ -268,6 +291,18 @@ where
     fn from(inst: Inst) -> Self {
         Self {
             inst,
+            kind: PhantomData,
+        }
+    }
+}
+
+impl<P> From<RawInst> for InstAndKind<P>
+where
+    P: PulleyTargetKind,
+{
+    fn from(inst: RawInst) -> Self {
+        Self {
+            inst: inst.into(),
             kind: PhantomData,
         }
     }
@@ -309,7 +344,7 @@ where
     type LabelUse = LabelUse;
     type ABIMachineSpec = PulleyMachineDeps<P>;
 
-    const TRAP_OPCODE: &'static [u8] = &[0];
+    const TRAP_OPCODE: &'static [u8] = TRAP_OPCODE;
 
     fn gen_dummy_use(_reg: Reg) -> Self {
         todo!()
@@ -325,7 +360,12 @@ where
 
     fn is_safepoint(&self) -> bool {
         match self.inst {
-            Inst::Trap { .. } => true,
+            Inst::Raw {
+                raw: RawInst::Trap { .. },
+            }
+            | Inst::Call { .. }
+            | Inst::IndirectCall { .. }
+            | Inst::IndirectCallHost { .. } => true,
             _ => false,
         }
     }
@@ -336,18 +376,22 @@ where
 
     fn is_move(&self) -> Option<(Writable<Reg>, Reg)> {
         match self.inst {
-            Inst::Xmov { dst, src } => Some((Writable::from_reg(*dst.to_reg()), *src)),
+            Inst::Raw {
+                raw: RawInst::Xmov { dst, src },
+            } => Some((Writable::from_reg(*dst.to_reg()), *src)),
             _ => None,
         }
     }
 
     fn is_included_in_clobbers(&self) -> bool {
-        self.is_args()
+        !self.is_args()
     }
 
     fn is_trap(&self) -> bool {
         match self.inst {
-            Inst::Trap { .. } => true,
+            Inst::Raw {
+                raw: RawInst::Trap { .. },
+            } => true,
             _ => false,
         }
     }
@@ -361,15 +405,14 @@ where
 
     fn is_term(&self) -> MachTerminator {
         match self.inst {
-            Inst::Ret { .. } | Inst::Rets { .. } => MachTerminator::Ret,
+            Inst::Raw {
+                raw: RawInst::Ret { .. },
+            }
+            | Inst::Rets { .. } => MachTerminator::Ret,
             Inst::Jump { .. } => MachTerminator::Uncond,
-            Inst::BrIf { .. }
-            | Inst::BrIfXeq32 { .. }
-            | Inst::BrIfXneq32 { .. }
-            | Inst::BrIfXslt32 { .. }
-            | Inst::BrIfXslteq32 { .. }
-            | Inst::BrIfXult32 { .. }
-            | Inst::BrIfXulteq32 { .. } => MachTerminator::Cond,
+            Inst::BrIf { .. } => MachTerminator::Cond,
+            Inst::BrTable { .. } => MachTerminator::Indirect,
+            Inst::ReturnCall { .. } | Inst::ReturnIndirectCall { .. } => MachTerminator::Indirect,
             _ => MachTerminator::None,
         }
     }
@@ -380,17 +423,17 @@ where
 
     fn gen_move(to_reg: Writable<Reg>, from_reg: Reg, ty: Type) -> Self {
         match ty {
-            ir::types::I8 | ir::types::I16 | ir::types::I32 | ir::types::I64 => Inst::Xmov {
+            ir::types::I8 | ir::types::I16 | ir::types::I32 | ir::types::I64 => RawInst::Xmov {
                 dst: WritableXReg::try_from(to_reg).unwrap(),
                 src: XReg::new(from_reg).unwrap(),
             }
             .into(),
-            ir::types::F32 | ir::types::F64 => Inst::Fmov {
+            ir::types::F32 | ir::types::F64 => RawInst::Fmov {
                 dst: WritableFReg::try_from(to_reg).unwrap(),
                 src: FReg::new(from_reg).unwrap(),
             }
             .into(),
-            _ if ty.is_vector() => Inst::Vmov {
+            _ if ty.is_vector() => RawInst::Vmov {
                 dst: WritableVReg::try_from(to_reg).unwrap(),
                 src: VReg::new(from_reg).unwrap(),
             }
@@ -437,23 +480,13 @@ where
         }
     }
 
-    fn gen_jump(_target: MachLabel) -> Self {
-        todo!()
+    fn gen_jump(label: MachLabel) -> Self {
+        Inst::Jump { label }.into()
     }
 
     fn worst_case_size() -> CodeOffset {
-        // `BrIfXeq32 { a, b, taken, not_taken }` expands to `br_if_xeq32 a, b, taken; jump not_taken`.
-        //
-        // The first instruction is seven bytes long:
-        //   * 1 byte opcode
-        //   * 1 byte `a` register encoding
-        //   * 1 byte `b` register encoding
-        //   * 4 byte `taken` displacement
-        //
-        // And the second instruction is five bytes long:
-        //   * 1 byte opcode
-        //   * 4 byte `not_taken` displacement
-        12
+        // `Vconst128 { dst, imm }` is 20 bytes (3 byte opcode + dst + 16-byte imm)
+        20
     }
 
     fn ref_type_regclass(_settings: &settings::Flags) -> RegClass {
@@ -466,6 +499,19 @@ where
             preferred: 1,
         }
     }
+}
+
+const TRAP_OPCODE: &'static [u8] = &[
+    pulley_interpreter::opcode::Opcode::ExtendedOp as u8,
+    ((pulley_interpreter::opcode::ExtendedOpcode::Trap as u16) >> 0) as u8,
+    ((pulley_interpreter::opcode::ExtendedOpcode::Trap as u16) >> 8) as u8,
+];
+
+#[test]
+fn test_trap_encoding() {
+    let mut dst = std::vec::Vec::new();
+    pulley_interpreter::encode::trap(&mut dst);
+    assert_eq!(dst, TRAP_OPCODE);
 }
 
 //=============================================================================
@@ -505,8 +551,10 @@ impl Inst {
         let format_ext = |ext: ExtKind| -> &'static str {
             match ext {
                 ExtKind::None => "",
-                ExtKind::Sign => "_s",
-                ExtKind::Zero => "_u",
+                ExtKind::Sign32 => "_s32",
+                ExtKind::Sign64 => "_s64",
+                ExtKind::Zero32 => "_u32",
+                ExtKind::Zero64 => "_u64",
             }
         };
 
@@ -530,29 +578,16 @@ impl Inst {
                 s
             }
 
-            Inst::Unwind { inst } => format!("unwind {inst:?}"),
-
-            Inst::Trap { code } => format!("trap // code = {code:?}"),
-
-            Inst::TrapIf {
-                cond,
-                size,
-                src1,
-                src2,
-                code,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                format!("trap_if {cond}, {size:?}, {src1}, {src2} // code = {code:?}")
+            Inst::TrapIf { cond, code } => {
+                format!("trap_{cond} // code = {code:?}")
             }
 
             Inst::Nop => format!("nop"),
 
-            Inst::Ret => format!("ret"),
-
-            Inst::GetSp { dst } => {
+            Inst::GetSpecial { dst, reg } => {
                 let dst = format_reg(*dst.to_reg());
-                format!("{dst} = get_sp")
+                let reg = format_reg(**reg);
+                format!("xmov {dst}, {reg}")
             }
 
             Inst::LoadExtName { dst, name, offset } => {
@@ -569,210 +604,30 @@ impl Inst {
                 format!("indirect_call {callee}, {info:?}")
             }
 
+            Inst::ReturnCall { info } => {
+                format!("return_call {info:?}")
+            }
+
+            Inst::ReturnIndirectCall { info } => {
+                let callee = format_reg(*info.dest);
+                format!("return_indirect_call {callee}, {info:?}")
+            }
+
+            Inst::IndirectCallHost { info } => {
+                format!("indirect_call_host {info:?}")
+            }
+
             Inst::Jump { label } => format!("jump {}", label.to_string()),
 
             Inst::BrIf {
-                c,
+                cond,
                 taken,
                 not_taken,
             } => {
-                let c = format_reg(**c);
                 let taken = taken.to_string();
                 let not_taken = not_taken.to_string();
-                format!("br_if {c}, {taken}; jump {not_taken}")
+                format!("br_{cond}, {taken}; jump {not_taken}")
             }
-
-            Inst::BrIfXeq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xeq32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXneq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xneq32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXslt32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xslt32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXslteq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xslteq32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXult32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xult32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXulteq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xulteq32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-
-            Inst::Xmov { dst, src } => {
-                let dst = format_reg(*dst.to_reg());
-                let src = format_reg(**src);
-                format!("{dst} = xmov {src}")
-            }
-            Inst::Fmov { dst, src } => {
-                let dst = format_reg(*dst.to_reg());
-                let src = format_reg(**src);
-                format!("{dst} = fmov {src}")
-            }
-            Inst::Vmov { dst, src } => {
-                let dst = format_reg(*dst.to_reg());
-                let src = format_reg(**src);
-                format!("{dst} = vmov {src}")
-            }
-
-            Inst::Xconst8 { dst, imm } => {
-                let dst = format_reg(*dst.to_reg());
-                format!("{dst} = xconst8 {imm}")
-            }
-            Inst::Xconst16 { dst, imm } => {
-                let dst = format_reg(*dst.to_reg());
-                format!("{dst} = xconst16 {imm}")
-            }
-            Inst::Xconst32 { dst, imm } => {
-                let dst = format_reg(*dst.to_reg());
-                format!("{dst} = xconst32 {imm}")
-            }
-            Inst::Xconst64 { dst, imm } => {
-                let dst = format_reg(*dst.to_reg());
-                format!("{dst} = xconst64 {imm}")
-            }
-
-            Inst::Xadd32 { dst, src1, src2 } => format!(
-                "{} = xadd32 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xadd64 { dst, src1, src2 } => format!(
-                "{} = xadd64 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-
-            Inst::Xeq64 { dst, src1, src2 } => format!(
-                "{} = xeq64 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xneq64 { dst, src1, src2 } => format!(
-                "{} = xneq64 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xslt64 { dst, src1, src2 } => format!(
-                "{} = xslt64 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xslteq64 { dst, src1, src2 } => format!(
-                "{} = xslteq64 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xult64 { dst, src1, src2 } => format!(
-                "{} = xult64 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xulteq64 { dst, src1, src2 } => format!(
-                "{} = xulteq64 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xeq32 { dst, src1, src2 } => format!(
-                "{} = xeq32 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xneq32 { dst, src1, src2 } => format!(
-                "{} = xneq32 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xslt32 { dst, src1, src2 } => format!(
-                "{} = xslt32 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xslteq32 { dst, src1, src2 } => format!(
-                "{} = xslteq32 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xult32 { dst, src1, src2 } => format!(
-                "{} = xult32 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
-            Inst::Xulteq32 { dst, src1, src2 } => format!(
-                "{} = xulteq32 {}, {}",
-                format_reg(*dst.to_reg()),
-                format_reg(**src1),
-                format_reg(**src2)
-            ),
 
             Inst::LoadAddr { dst, mem } => {
                 let dst = format_reg(*dst.to_reg());
@@ -780,21 +635,21 @@ impl Inst {
                 format!("{dst} = load_addr {mem}")
             }
 
-            Inst::Load {
+            Inst::XLoad {
                 dst,
                 mem,
                 ty,
                 flags,
                 ext,
             } => {
-                let dst = format_reg(dst.to_reg());
+                let dst = format_reg(*dst.to_reg());
                 let ty = ty.bits();
                 let ext = format_ext(*ext);
                 let mem = mem.to_string();
-                format!("{dst} = load{ty}{ext} {mem} // flags ={flags}")
+                format!("{dst} = xload{ty}{ext} {mem} // flags ={flags}")
             }
 
-            Inst::Store {
+            Inst::XStore {
                 mem,
                 src,
                 ty,
@@ -802,30 +657,68 @@ impl Inst {
             } => {
                 let ty = ty.bits();
                 let mem = mem.to_string();
-                let src = format_reg(*src);
-                format!("store{ty} {mem}, {src} // flags = {flags}")
+                let src = format_reg(**src);
+                format!("xstore{ty} {mem}, {src} // flags = {flags}")
             }
 
-            Inst::BitcastIntFromFloat32 { dst, src } => {
+            Inst::FLoad {
+                dst,
+                mem,
+                ty,
+                flags,
+            } => {
                 let dst = format_reg(*dst.to_reg());
-                let src = format_reg(**src);
-                format!("{dst} = bitcast_int_from_float32 {src}")
+                let ty = ty.bits();
+                let mem = mem.to_string();
+                format!("{dst} = fload{ty} {mem} // flags ={flags}")
             }
-            Inst::BitcastIntFromFloat64 { dst, src } => {
+
+            Inst::FStore {
+                mem,
+                src,
+                ty,
+                flags,
+            } => {
+                let ty = ty.bits();
+                let mem = mem.to_string();
+                let src = format_reg(**src);
+                format!("fstore{ty} {mem}, {src} // flags = {flags}")
+            }
+
+            Inst::VLoad {
+                dst,
+                mem,
+                ty,
+                flags,
+                ext,
+            } => {
                 let dst = format_reg(*dst.to_reg());
-                let src = format_reg(**src);
-                format!("{dst} = bitcast_int_from_float64 {src}")
+                let ty = ty.bits();
+                let mem = mem.to_string();
+                format!("{dst} = vload{ty}_{ext:?} {mem} // flags ={flags}")
             }
-            Inst::BitcastFloatFromInt32 { dst, src } => {
-                let dst = format_reg(*dst.to_reg());
+
+            Inst::VStore {
+                mem,
+                src,
+                ty,
+                flags,
+            } => {
+                let ty = ty.bits();
+                let mem = mem.to_string();
                 let src = format_reg(**src);
-                format!("{dst} = bitcast_float_from_int32 {src}")
+                format!("vstore{ty} {mem}, {src} // flags = {flags}")
             }
-            Inst::BitcastFloatFromInt64 { dst, src } => {
-                let dst = format_reg(*dst.to_reg());
-                let src = format_reg(**src);
-                format!("{dst} = bitcast_float_from_int64 {src}")
+
+            Inst::BrTable {
+                idx,
+                default,
+                targets,
+            } => {
+                let idx = format_reg(**idx);
+                format!("br_table {idx} {default:?} {targets:?}")
             }
+            Inst::Raw { raw } => generated::print(raw),
         }
     }
 }

@@ -46,8 +46,9 @@ use super::{VMArrayRef, VMGcObjectDataMut, VMStructRef};
 use crate::hash_set::HashSet;
 use crate::prelude::*;
 use crate::runtime::vm::{
-    ExternRefHostDataId, ExternRefHostDataTable, GarbageCollection, GcHeap, GcHeapObject,
-    GcProgress, GcRootsIter, GcRuntime, Mmap, TypedGcRef, VMExternRef, VMGcHeader, VMGcRef,
+    mmap::AlignedLength, ExternRefHostDataId, ExternRefHostDataTable, GarbageCollection, GcHeap,
+    GcHeapObject, GcProgress, GcRootsIter, GcRuntime, Mmap, TypedGcRef, VMExternRef, VMGcHeader,
+    VMGcRef,
 };
 use core::ops::{Deref, DerefMut, Range};
 use core::{
@@ -90,7 +91,7 @@ struct DrcHeap {
     // NB: this box shouldn't be strictly necessary, but it makes upholding the
     // safety invariants of the `vmctx_gc_heap_data` more obviously correct.
     activations_table: Box<VMGcRefActivationsTable>,
-    heap: Mmap,
+    heap: Mmap<AlignedLength>,
     free_list: FreeList,
 }
 
@@ -112,18 +113,6 @@ impl DrcHeap {
         })
     }
 
-    fn heap_slice(&self) -> &[UnsafeCell<u8>] {
-        let ptr = self.heap.as_ptr().cast::<UnsafeCell<u8>>();
-        let len = self.heap.len();
-        unsafe { core::slice::from_raw_parts(ptr, len) }
-    }
-
-    fn heap_slice_mut(&mut self) -> &mut [u8] {
-        let ptr = self.heap.as_mut_ptr();
-        let len = self.heap.len();
-        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
-    }
-
     fn dealloc(&mut self, gc_ref: VMGcRef) {
         let drc_ref = drc_ref(&gc_ref);
         let size = self.index(drc_ref).object_size();
@@ -140,44 +129,6 @@ impl DrcHeap {
             .object_size();
         let end = start.checked_add(size).unwrap();
         start..end
-    }
-
-    /// Index into this heap and get a shared reference to the `T` that `gc_ref`
-    /// points to.
-    ///
-    /// # Panics
-    ///
-    /// Panics on out of bounds or if the `gc_ref` is an `i31ref`.
-    fn index<T>(&self, gc_ref: &TypedGcRef<T>) -> &T
-    where
-        T: GcHeapObject,
-    {
-        assert!(!mem::needs_drop::<T>());
-        let gc_ref = gc_ref.as_untyped();
-        let start = gc_ref.as_heap_index().unwrap().get();
-        let start = usize::try_from(start).unwrap();
-        let len = mem::size_of::<T>();
-        let slice = &self.heap_slice()[start..][..len];
-        unsafe { &*(slice.as_ptr().cast::<T>()) }
-    }
-
-    /// Index into this heap and get an exclusive reference to the `T` that
-    /// `gc_ref` points to.
-    ///
-    /// # Panics
-    ///
-    /// Panics on out of bounds or if the `gc_ref` is an `i31ref`.
-    fn index_mut<T>(&mut self, gc_ref: &TypedGcRef<T>) -> &mut T
-    where
-        T: GcHeapObject,
-    {
-        assert!(!mem::needs_drop::<T>());
-        let gc_ref = gc_ref.as_untyped();
-        let start = gc_ref.as_heap_index().unwrap().get();
-        let start = usize::try_from(start).unwrap();
-        let len = mem::size_of::<T>();
-        let slice = &mut self.heap_slice_mut()[start..][..len];
-        unsafe { &mut *(slice.as_mut_ptr().cast::<T>()) }
     }
 
     /// Increment the ref count for the associated object.
@@ -530,10 +481,6 @@ unsafe impl GcHeap for DrcHeap {
         self.no_gc_count -= 1;
     }
 
-    fn header(&self, gc_ref: &VMGcRef) -> &VMGcHeader {
-        self.index(gc_ref.as_typed_unchecked())
-    }
-
     fn clone_gc_ref(&mut self, gc_ref: &VMGcRef) -> VMGcRef {
         self.inc_ref(gc_ref);
         gc_ref.unchecked_copy()
@@ -561,7 +508,6 @@ unsafe impl GcHeap for DrcHeap {
     }
 
     fn expose_gc_ref_to_wasm(&mut self, gc_ref: VMGcRef) {
-        // self.inc_ref(&gc_ref);
         self.activations_table.insert_without_gc(gc_ref);
     }
 
@@ -585,10 +531,26 @@ unsafe impl GcHeap for DrcHeap {
         self.index(typed_ref).host_data
     }
 
+    fn header(&self, gc_ref: &VMGcRef) -> &VMGcHeader {
+        self.index(gc_ref.as_typed_unchecked())
+    }
+
+    fn header_mut(&mut self, gc_ref: &VMGcRef) -> &mut VMGcHeader {
+        self.index_mut(gc_ref.as_typed_unchecked())
+    }
+
+    fn object_size(&self, gc_ref: &VMGcRef) -> usize {
+        let size = self.header(gc_ref).reserved_u27();
+        usize::try_from(size).unwrap()
+    }
+
     fn alloc_raw(&mut self, mut header: VMGcHeader, layout: Layout) -> Result<Option<VMGcRef>> {
+        debug_assert!(layout.size() >= core::mem::size_of::<VMDrcHeader>());
+        debug_assert!(layout.align() >= core::mem::align_of::<VMDrcHeader>());
+
         let size = u32::try_from(layout.size()).unwrap();
         if !VMGcKind::value_fits_in_unused_bits(size) {
-            return Err(crate::Trap::AllocationTooLarge.into_anyhow());
+            return Err(crate::Trap::AllocationTooLarge.into());
         }
 
         let gc_ref = match self.free_list.alloc(layout)? {
@@ -705,14 +667,6 @@ unsafe impl GcHeap for DrcHeap {
         })
     }
 
-    unsafe fn vmctx_gc_heap_base(&self) -> *mut u8 {
-        self.heap.as_ptr().cast_mut()
-    }
-
-    unsafe fn vmctx_gc_heap_bound(&self) -> usize {
-        self.heap.len()
-    }
-
     unsafe fn vmctx_gc_heap_data(&self) -> *mut u8 {
         let ptr = &*self.activations_table as *const VMGcRefActivationsTable;
         ptr.cast_mut().cast::<u8>()
@@ -730,6 +684,18 @@ unsafe impl GcHeap for DrcHeap {
         *no_gc_count = 0;
         free_list.reset();
         activations_table.reset();
+    }
+
+    fn heap_slice(&self) -> &[UnsafeCell<u8>] {
+        let ptr = self.heap.as_ptr().cast();
+        let len = self.heap.len();
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    }
+
+    fn heap_slice_mut(&mut self) -> &mut [u8] {
+        let ptr = self.heap.as_mut_ptr();
+        let len = self.heap.len();
+        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
 }
 
@@ -1019,6 +985,7 @@ impl<T> DerefMut for DebugOnly<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasmtime_environ::HostPtr;
 
     #[test]
     fn vm_drc_header_size_align() {
@@ -1053,7 +1020,7 @@ mod tests {
         let actual_offset = (ref_count_ptr as usize) - (extern_data_ptr as usize);
 
         let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
-            ptr: 8,
+            ptr: HostPtr,
             num_imported_functions: 0,
             num_imported_tables: 0,
             num_imported_memories: 0,
@@ -1081,7 +1048,7 @@ mod tests {
         let actual_offset = (next_ptr as usize) - (table_ptr as usize);
 
         let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
-            ptr: 8,
+            ptr: HostPtr,
             num_imported_functions: 0,
             num_imported_tables: 0,
             num_imported_memories: 0,
@@ -1108,7 +1075,7 @@ mod tests {
         let actual_offset = (end_ptr as usize) - (table_ptr as usize);
 
         let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
-            ptr: 8,
+            ptr: HostPtr,
             num_imported_functions: 0,
             num_imported_tables: 0,
             num_imported_memories: 0,

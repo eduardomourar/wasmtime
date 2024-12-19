@@ -125,7 +125,25 @@ pub trait WasiHttpView: Send {
     fn is_forbidden_header(&mut self, _name: &HeaderName) -> bool {
         false
     }
+
+    /// Number of distinct write calls to the outgoing body's output-stream
+    /// that the implementation will buffer.
+    /// Default: 1.
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS
+    }
+
+    /// Maximum size allowed in a write call to the outgoing body's output-stream.
+    /// Default: 1024 * 1024.
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        DEFAULT_OUTGOING_BODY_CHUNK_SIZE
+    }
 }
+
+/// The default value configured for [`WasiHttpView::outgoing_body_buffer_chunks`] in [`WasiHttpView`].
+pub const DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS: usize = 1;
+/// The default value configured for [`WasiHttpView::outgoing_body_chunk_size`] in [`WasiHttpView`].
+pub const DEFAULT_OUTGOING_BODY_CHUNK_SIZE: usize = 1024 * 1024;
 
 impl<T: ?Sized + WasiHttpView> WasiHttpView for &mut T {
     fn ctx(&mut self) -> &mut WasiHttpCtx {
@@ -155,6 +173,14 @@ impl<T: ?Sized + WasiHttpView> WasiHttpView for &mut T {
 
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
         T::is_forbidden_header(self, name)
+    }
+
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        T::outgoing_body_buffer_chunks(self)
+    }
+
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        T::outgoing_body_chunk_size(self)
     }
 }
 
@@ -186,6 +212,14 @@ impl<T: ?Sized + WasiHttpView> WasiHttpView for Box<T> {
 
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
         T::is_forbidden_header(self, name)
+    }
+
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        T::outgoing_body_buffer_chunks(self)
+    }
+
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        T::outgoing_body_chunk_size(self)
     }
 }
 
@@ -232,6 +266,14 @@ impl<T: WasiHttpView> WasiHttpView for WasiHttpImpl<T> {
 
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
         self.0.is_forbidden_header(name)
+    }
+
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        self.0.outgoing_body_buffer_chunks()
+    }
+
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        self.0.outgoing_body_chunk_size()
     }
 }
 

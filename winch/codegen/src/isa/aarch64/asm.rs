@@ -1,23 +1,27 @@
 //! Assembler library implementation for Aarch64.
 
 use super::{address::Address, regs};
-use crate::masm::{ExtendKind, FloatCmpKind, IntCmpKind, RoundingMode, ShiftKind};
+use crate::aarch64::regs::zero;
+use crate::masm::{
+    DivKind, ExtendKind, FloatCmpKind, IntCmpKind, RemKind, RoundingMode, ShiftKind,
+};
+use crate::CallingConvention;
 use crate::{
     masm::OperandSize,
     reg::{writable, Reg, WritableReg},
 };
-use cranelift_codegen::ir::TrapCode;
-use cranelift_codegen::isa::aarch64::inst::{
-    BitOp, BranchTarget, Cond, CondBrKind, FPULeftShiftImm, FPUOp1, FPUOp2,
-    FPUOpRI::{self, UShr32, UShr64},
-    FPUOpRIMod, FPURightShiftImm, FpuRoundMode, ImmLogic, ImmShift, ScalarSize,
-};
+
+use cranelift_codegen::isa::aarch64::inst::{UImm5, NZCV};
 use cranelift_codegen::{
-    ir::{MemFlags, SourceLoc},
+    ir::{ExternalName, LibCall, MemFlags, SourceLoc, TrapCode, UserExternalNameRef},
     isa::aarch64::inst::{
         self,
         emit::{EmitInfo, EmitState},
-        ALUOp, ALUOp3, AMode, ExtendOp, Imm12, Inst, PairAMode, VecLanesOp, VecMisc2, VectorSize,
+        ALUOp, ALUOp3, AMode, BitOp, BranchTarget, Cond, CondBrKind, ExtendOp, FPULeftShiftImm,
+        FPUOp1, FPUOp2,
+        FPUOpRI::{self, UShr32, UShr64},
+        FPUOpRIMod, FPURightShiftImm, FpuRoundMode, Imm12, ImmLogic, ImmShift, Inst, IntToFpuOp,
+        PairAMode, ScalarSize, VecLanesOp, VecMisc2, VectorSize,
     },
     settings, Final, MachBuffer, MachBufferFinalized, MachInst, MachInstEmit, MachInstEmitState,
     MachLabel, Writable,
@@ -201,7 +205,7 @@ impl Assembler {
         self.ldr(addr, rd, size, false);
     }
 
-    /// Load a register.
+    /// Load address into a register.
     fn ldr(&mut self, addr: Address, rd: WritableReg, size: OperandSize, signed: bool) {
         use OperandSize::*;
         let writable_reg = rd.map(Into::into);
@@ -395,6 +399,102 @@ impl Assembler {
         let scratch = regs::scratch();
         self.load_constant(imm, writable!(scratch));
         self.emit_alu_rrrr(ALUOp3::MAdd, scratch, rn, rd, regs::zero(), size);
+    }
+
+    /// Signed/unsigned division with three registers.
+    pub fn div_rrr(
+        &mut self,
+        divisor: Reg,
+        dividend: Reg,
+        dest: Writable<Reg>,
+        kind: DivKind,
+        size: OperandSize,
+    ) {
+        // Check for division by 0.
+        self.trapz(divisor, TrapCode::INTEGER_DIVISION_BY_ZERO, size);
+
+        // check for overflow
+        if kind == DivKind::Signed {
+            // Check for divisor overflow.
+            self.emit_alu_rri(
+                ALUOp::AddS,
+                Imm12::maybe_from_u64(1).expect("1 to fit in 12 bits"),
+                divisor,
+                writable!(zero()),
+                size,
+            );
+
+            // Check if the dividend is 1.
+            self.emit(Inst::CCmpImm {
+                size: size.into(),
+                rn: dividend.into(),
+                imm: UImm5::maybe_from_u8(1).expect("1 fits in 5 bits"),
+                nzcv: NZCV::new(false, false, false, false),
+                cond: Cond::Eq,
+            });
+
+            // Finally, trap if the previous operation overflowed.
+            self.trapif(Cond::Vs, TrapCode::INTEGER_OVERFLOW);
+        }
+
+        // `cranelift-codegen` doesn't support emitting sdiv for anything but I64,
+        // we therefore sign-extend the operand.
+        // see: https://github.com/bytecodealliance/wasmtime/issues/9766
+        let size = if size == OperandSize::S32 && kind == DivKind::Signed {
+            self.extend(divisor, writable!(divisor), ExtendKind::I64Extend32S);
+            self.extend(dividend, writable!(dividend), ExtendKind::I64Extend32S);
+            OperandSize::S64
+        } else {
+            size
+        };
+
+        let op = match kind {
+            DivKind::Signed => ALUOp::SDiv,
+            DivKind::Unsigned => ALUOp::UDiv,
+        };
+
+        self.emit_alu_rrr(op, divisor, dividend, dest.map(Into::into), size);
+    }
+
+    /// Signed/unsigned remainder operation with three registers.
+    pub fn rem_rrr(
+        &mut self,
+        divisor: Reg,
+        dividend: Reg,
+        dest: Writable<Reg>,
+        kind: RemKind,
+        size: OperandSize,
+    ) {
+        // Check for division by 0
+        self.trapz(divisor, TrapCode::INTEGER_DIVISION_BY_ZERO, size);
+
+        // `cranelift-codegen` doesn't support emitting sdiv for anything but I64,
+        // we therefore sign-extend the operand.
+        // see: https://github.com/bytecodealliance/wasmtime/issues/9766
+        let size = if size == OperandSize::S32 && kind.is_signed() {
+            self.extend(divisor, writable!(divisor), ExtendKind::I64Extend32S);
+            self.extend(dividend, writable!(dividend), ExtendKind::I64Extend32S);
+            OperandSize::S64
+        } else {
+            size
+        };
+
+        let op = match kind {
+            RemKind::Signed => ALUOp::SDiv,
+            RemKind::Unsigned => ALUOp::UDiv,
+        };
+
+        let scratch = regs::scratch();
+        self.emit_alu_rrr(op, divisor, dividend, writable!(scratch.into()), size);
+
+        self.emit_alu_rrrr(
+            ALUOp3::MSub,
+            scratch,
+            divisor,
+            dest.map(Into::into),
+            dividend,
+            size,
+        );
     }
 
     /// And with three registers.
@@ -600,6 +700,52 @@ impl Assembler {
         })
     }
 
+    /// Convert an signed integer to a float.
+    pub fn cvt_sint_to_float(
+        &mut self,
+        rn: Reg,
+        rd: WritableReg,
+        src_size: OperandSize,
+        dst_size: OperandSize,
+    ) {
+        let op = match (src_size, dst_size) {
+            (OperandSize::S32, OperandSize::S32) => IntToFpuOp::I32ToF32,
+            (OperandSize::S64, OperandSize::S32) => IntToFpuOp::I64ToF32,
+            (OperandSize::S32, OperandSize::S64) => IntToFpuOp::I32ToF64,
+            (OperandSize::S64, OperandSize::S64) => IntToFpuOp::I64ToF64,
+            _ => unreachable!(),
+        };
+
+        self.emit(Inst::IntToFpu {
+            op,
+            rd: rd.map(Into::into),
+            rn: rn.into(),
+        });
+    }
+
+    /// Convert an unsigned integer to a float.
+    pub fn cvt_uint_to_float(
+        &mut self,
+        rn: Reg,
+        rd: WritableReg,
+        src_size: OperandSize,
+        dst_size: OperandSize,
+    ) {
+        let op = match (src_size, dst_size) {
+            (OperandSize::S32, OperandSize::S32) => IntToFpuOp::U32ToF32,
+            (OperandSize::S64, OperandSize::S32) => IntToFpuOp::U64ToF32,
+            (OperandSize::S32, OperandSize::S64) => IntToFpuOp::U32ToF64,
+            (OperandSize::S64, OperandSize::S64) => IntToFpuOp::U64ToF64,
+            _ => unreachable!(),
+        };
+
+        self.emit(Inst::IntToFpu {
+            op,
+            rd: rd.map(Into::into),
+            rn: rn.into(),
+        });
+    }
+
     /// Change precision of float.
     pub fn cvt_float_to_float(
         &mut self,
@@ -720,6 +866,14 @@ impl Assembler {
     pub fn trapif(&mut self, cc: Cond, code: TrapCode) {
         self.emit(Inst::TrapIf {
             kind: CondBrKind::Cond(cc),
+            trap_code: code,
+        });
+    }
+
+    /// Trap if `rn` is zero.
+    pub fn trapz(&mut self, rn: Reg, code: TrapCode, size: OperandSize) {
+        self.emit(Inst::TrapIf {
+            kind: CondBrKind::Zero(rn.into(), size.into()),
             trap_code: code,
         });
     }
@@ -900,5 +1054,39 @@ impl Assembler {
     /// Get a reference to the underlying machine buffer.
     pub fn buffer(&self) -> &MachBuffer<Inst> {
         &self.buffer
+    }
+
+    /// Emit a direct call to a function defined locally and
+    /// referenced to by `name`.
+    pub fn call_with_name(&mut self, name: UserExternalNameRef, call_conv: CallingConvention) {
+        self.emit(Inst::Call {
+            info: Box::new(cranelift_codegen::CallInfo::empty(
+                ExternalName::user(name),
+                call_conv.into(),
+            )),
+        })
+    }
+
+    /// Emit an indirect call to a function whose address is
+    /// stored the `callee` register.
+    pub fn call_with_reg(&mut self, callee: Reg, call_conv: CallingConvention) {
+        self.emit(Inst::CallInd {
+            info: Box::new(cranelift_codegen::CallInfo::empty(
+                callee.into(),
+                call_conv.into(),
+            )),
+        })
+    }
+
+    /// Emit a call to a well-known libcall.
+    /// `dst` is used as a scratch register to hold the address of the libcall function.
+    pub fn call_with_lib(&mut self, lib: LibCall, dst: Reg, call_conv: CallingConvention) {
+        let name = ExternalName::LibCall(lib);
+        self.emit(Inst::LoadExtName {
+            rd: writable!(dst.into()),
+            name: name.into(),
+            offset: 0,
+        });
+        self.call_with_reg(dst, call_conv)
     }
 }

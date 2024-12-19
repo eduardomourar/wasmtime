@@ -7,102 +7,6 @@ use core::ops::Range;
 use cranelift_entity::{packed_option::ReservedValue, EntityRef};
 use serde_derive::{Deserialize, Serialize};
 
-/// Implementation styles for WebAssembly linear memory.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub enum MemoryStyle {
-    /// The actual memory can be resized and moved.
-    Dynamic {
-        /// Extra space to reserve when a memory must be moved due to growth.
-        reserve: u64,
-    },
-    /// Address space is allocated up front.
-    Static {
-        /// The number of bytes which are reserved for this linear memory. Only
-        /// the lower bytes which represent the actual linear memory need be
-        /// mapped, but other bytes must be guaranteed to be unmapped.
-        byte_reservation: u64,
-    },
-}
-
-impl MemoryStyle {
-    /// Decide on an implementation style for the given `Memory`.
-    pub fn for_memory(memory: Memory, tunables: &Tunables) -> (Self, u64) {
-        let is_static =
-            // Ideally we would compare against (an upper bound on) the target's
-            // page size, but unfortunately that is a little hard to plumb
-            // through here.
-            memory.page_size_log2 >= Memory::DEFAULT_PAGE_SIZE_LOG2
-            && tunables.signals_based_traps
-            && match memory.maximum_byte_size() {
-                Ok(mut maximum) => {
-                    if tunables.static_memory_bound_is_maximum {
-                        maximum = maximum.min(tunables.static_memory_reservation);
-                    }
-
-                    // Ensure the minimum is less than the maximum; the minimum might exceed the maximum
-                    // when the memory is artificially bounded via `static_memory_bound_is_maximum` above
-                    memory.minimum_byte_size().unwrap() <= maximum
-                        && maximum <= tunables.static_memory_reservation
-                }
-
-                // If the maximum size of this memory is not representable with
-                // `u64` then use the `static_memory_bound_is_maximum` to indicate
-                // whether it's a static memory or not. It should be ok to discard
-                // the linear memory's maximum size here as growth to the maximum is
-                // always fallible and never guaranteed.
-                Err(_) => tunables.static_memory_bound_is_maximum,
-            };
-
-        if is_static {
-            return (
-                Self::Static {
-                    byte_reservation: tunables.static_memory_reservation,
-                },
-                tunables.static_memory_offset_guard_size,
-            );
-        }
-
-        // Otherwise, make it dynamic.
-        (
-            Self::Dynamic {
-                reserve: tunables.dynamic_memory_growth_reserve,
-            },
-            tunables.dynamic_memory_offset_guard_size,
-        )
-    }
-}
-
-/// A WebAssembly linear memory description along with our chosen style for
-/// implementing it.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub struct MemoryPlan {
-    /// The WebAssembly linear memory description.
-    pub memory: Memory,
-    /// Our chosen implementation style.
-    pub style: MemoryStyle,
-    /// Chosen size of a guard page before the linear memory allocation.
-    pub pre_guard_size: u64,
-    /// Our chosen offset-guard size.
-    pub offset_guard_size: u64,
-}
-
-impl MemoryPlan {
-    /// Draw up a plan for implementing a `Memory`.
-    pub fn for_memory(memory: Memory, tunables: &Tunables) -> Self {
-        let (style, offset_guard_size) = MemoryStyle::for_memory(memory, tunables);
-        Self {
-            memory,
-            style,
-            offset_guard_size,
-            pre_guard_size: if tunables.guard_before_linear_memory {
-                offset_guard_size
-            } else {
-                0
-            },
-        }
-    }
-}
-
 /// A WebAssembly linear memory initializer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemoryInitializer {
@@ -310,44 +214,6 @@ pub trait InitMemory {
     fn write(&mut self, memory_index: MemoryIndex, init: &StaticMemoryInitializer) -> bool;
 }
 
-/// Implementation styles for WebAssembly tables.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub enum TableStyle {
-    /// Signatures are stored in the table and checked in the caller.
-    CallerChecksSignature {
-        /// Whether this table is initialized lazily and requires an
-        /// initialization check on every access.
-        lazy_init: bool,
-    },
-}
-
-impl TableStyle {
-    /// Decide on an implementation style for the given `Table`.
-    pub fn for_table(_table: Table, tunables: &Tunables) -> Self {
-        Self::CallerChecksSignature {
-            lazy_init: tunables.table_lazy_init,
-        }
-    }
-}
-
-/// A WebAssembly table description along with our chosen style for
-/// implementing it.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub struct TablePlan {
-    /// The WebAssembly table description.
-    pub table: Table,
-    /// Our chosen implementation style.
-    pub style: TableStyle,
-}
-
-impl TablePlan {
-    /// Draw up a plan for implementing a `Table`.
-    pub fn for_table(table: Table, tunables: &Tunables) -> Self {
-        let style = TableStyle::for_table(table, tunables);
-        Self { table, style }
-    }
-}
-
 /// Table initialization data for all tables in the module.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TableInitialization {
@@ -481,10 +347,10 @@ pub struct Module {
     pub functions: PrimaryMap<FuncIndex, FunctionType>,
 
     /// WebAssembly tables.
-    pub table_plans: PrimaryMap<TableIndex, TablePlan>,
+    pub tables: PrimaryMap<TableIndex, Table>,
 
     /// WebAssembly linear memory plans.
-    pub memory_plans: PrimaryMap<MemoryIndex, MemoryPlan>,
+    pub memories: PrimaryMap<MemoryIndex, Memory>,
 
     /// WebAssembly global variables.
     pub globals: PrimaryMap<GlobalIndex, Global>,
@@ -589,7 +455,7 @@ impl Module {
     #[inline]
     pub fn owned_memory_index(&self, memory: DefinedMemoryIndex) -> OwnedMemoryIndex {
         assert!(
-            memory.index() < self.memory_plans.len(),
+            memory.index() < self.memories.len(),
             "non-shared memory must have an owned index"
         );
 
@@ -597,11 +463,11 @@ impl Module {
         // plans, we can iterate through the plans up to the memory index and
         // count how many are not shared (i.e., owned).
         let owned_memory_index = self
-            .memory_plans
+            .memories
             .iter()
             .skip(self.num_imported_memories)
             .take(memory.index())
-            .filter(|(_, mp)| !mp.memory.shared)
+            .filter(|(_, mp)| !mp.shared)
             .count();
         OwnedMemoryIndex::new(owned_memory_index)
     }
@@ -651,8 +517,8 @@ impl Module {
     pub fn type_of(&self, index: EntityIndex) -> EntityType {
         match index {
             EntityIndex::Global(i) => EntityType::Global(self.globals[i]),
-            EntityIndex::Table(i) => EntityType::Table(self.table_plans[i].table),
-            EntityIndex::Memory(i) => EntityType::Memory(self.memory_plans[i].memory),
+            EntityIndex::Table(i) => EntityType::Table(self.tables[i]),
+            EntityIndex::Memory(i) => EntityType::Memory(self.memories[i]),
             EntityIndex::Function(i) => {
                 EntityType::Function(EngineOrModuleTypeIndex::Module(self.functions[i].signature))
             }
@@ -673,6 +539,18 @@ impl Module {
     /// module.
     pub fn defined_func_indices(&self) -> impl Iterator<Item = DefinedFuncIndex> {
         (0..self.functions.len() - self.num_imported_funcs).map(|i| DefinedFuncIndex::new(i))
+    }
+
+    /// Returns the number of tables defined by this module itself: all tables
+    /// minus imported tables.
+    pub fn num_defined_tables(&self) -> usize {
+        self.tables.len() - self.num_imported_tables
+    }
+
+    /// Returns the number of memories defined by this module itself: all
+    /// memories minus imported memories.
+    pub fn num_defined_memories(&self) -> usize {
+        self.memories.len() - self.num_imported_memories
     }
 }
 

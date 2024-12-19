@@ -124,9 +124,13 @@ pub use self::values::Val;
 
 pub(crate) use self::resources::HostResourceData;
 
-// These items are expected to be used by an eventual
-// `#[derive(ComponentType)]`, they are not part of Wasmtime's API stability
-// guarantees
+// Re-export wasm_wave crate so the compatible version of this dep doesn't have to be
+// tracked separately from wasmtime.
+#[cfg(feature = "wave")]
+pub use wasm_wave;
+
+// These items are used by `#[derive(ComponentType, Lift, Lower)]`, but they are not part of
+// Wasmtime's API stability guarantees
 #[doc(hidden)]
 pub mod __internal {
     pub use super::func::{
@@ -368,13 +372,6 @@ pub(crate) use self::store::ComponentStoreData;
 ///         serde::Deserialize,
 ///         serde::Serialize,
 ///     ],
-///
-///     // A list of WIT "features" to enable when parsing the WIT document that
-///     // this bindgen macro matches. WIT features are all disabled by default
-///     // and must be opted-in-to if source level features are used.
-///     //
-///     // This option defaults to an empty array.
-///     features: ["foo", "bar", "baz"],
 ///
 ///     // An niche configuration option to require that the `T` in `Store<T>`
 ///     // is always `Send` in the generated bindings. Typically not needed

@@ -32,13 +32,17 @@ thiserror = { workspace = true }
 cfg-if = { workspace = true }
 wasmtime-versioned-export-macros = { workspace = true }
 itertools = "0.12"
+pulley-interpreter = { workspace = true, optional = true }
 
 [features]
 all-arch = ["cranelift-codegen/all-arch"]
 host-arch = ["cranelift-codegen/host-arch"]
-pulley = ["cranelift-codegen/pulley"]
+pulley = ["cranelift-codegen/pulley", "dep:pulley-interpreter"]
+trace-log = ["cranelift-codegen/trace-log"]
 component-model = ["wasmtime-environ/component-model"]
 incremental-cache = ["cranelift-codegen/incremental-cache"]
 wmemcheck = ["wasmtime-environ/wmemcheck"]
 gc = ["wasmtime-environ/gc"]
+gc-drc = ["gc", "wasmtime-environ/gc-drc"]
+gc-null = ["gc", "wasmtime-environ/gc-null"]
 threads = ["wasmtime-environ/threads"]

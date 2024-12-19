@@ -1,5 +1,6 @@
 //! Pulley registers.
 
+use crate::U6;
 use core::hash::Hash;
 use core::marker::PhantomData;
 use core::{fmt, ops::Range};
@@ -69,31 +70,36 @@ macro_rules! impl_reg {
 pub enum XReg {
     x0,  x1,  x2,  x3,  x4,  x5,  x6,  x7,  x8,  x9,
     x10, x11, x12, x13, x14, x15, x16, x17, x18, x19,
-    x20, x21, x22, x23, x24, x25, x26,
+    x20, x21, x22, x23, x24, x25, x26, x27, x28, x29,
 
     /// The special `sp` stack pointer register.
     sp,
 
-    /// The special `lr` link register.
-    lr,
-
-    /// The special `fp` frame pointer register.
-    fp,
-
     /// The special `spilltmp0` scratch register.
     spilltmp0,
 
-    /// The special `spilltmp1` scratch register.
-    spilltmp1,
 }
 
 impl XReg {
+    /// Index of the first "special" register.
+    pub const SPECIAL_START: u8 = XReg::sp as u8;
+
     /// Is this `x` register a special register?
     pub fn is_special(self) -> bool {
-        matches!(
-            self,
-            Self::sp | Self::lr | Self::fp | Self::spilltmp0 | Self::spilltmp1
-        )
+        matches!(self, Self::sp | Self::spilltmp0)
+    }
+}
+
+#[test]
+fn assert_special_start_is_right() {
+    for i in 0..XReg::SPECIAL_START {
+        assert!(!XReg::new(i).unwrap().is_special());
+    }
+    for i in XReg::SPECIAL_START.. {
+        match XReg::new(i) {
+            Some(r) => assert!(r.is_special()),
+            None => break,
+        }
     }
 }
 
@@ -159,25 +165,27 @@ impl fmt::Debug for AnyReg {
 /// Operands to a binary operation, packed into a 16-bit word (5 bits per register).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct BinaryOperands<R> {
+pub struct BinaryOperands<D, S1 = D, S2 = D> {
     /// The destination register, packed in bits 0..5.
-    pub dst: R,
+    pub dst: D,
     /// The first source register, packed in bits 5..10.
-    pub src1: R,
+    pub src1: S1,
     /// The second source register, packed in bits 10..15.
-    pub src2: R,
+    pub src2: S2,
 }
 
-impl<R: Reg> BinaryOperands<R> {
+impl<D, S1, S2> BinaryOperands<D, S1, S2> {
     /// Convenience constructor for applying `Into`
-    pub fn new(dst: impl Into<R>, src1: impl Into<R>, src2: impl Into<R>) -> Self {
+    pub fn new(dst: impl Into<D>, src1: impl Into<S1>, src2: impl Into<S2>) -> Self {
         Self {
             dst: dst.into(),
             src1: src1.into(),
             src2: src2.into(),
         }
     }
+}
 
+impl<D: Reg, S1: Reg, S2: Reg> BinaryOperands<D, S1, S2> {
     /// Convert to dense 16 bit encoding.
     pub fn to_bits(self) -> u16 {
         let dst = self.dst.to_u8();
@@ -189,9 +197,28 @@ impl<R: Reg> BinaryOperands<R> {
     /// Convert from dense 16 bit encoding. The topmost bit is ignored.
     pub fn from_bits(bits: u16) -> Self {
         Self {
-            dst: R::new((bits & 0b11111) as u8).unwrap(),
-            src1: R::new(((bits >> 5) & 0b11111) as u8).unwrap(),
-            src2: R::new(((bits >> 10) & 0b11111) as u8).unwrap(),
+            dst: D::new((bits & 0b11111) as u8).unwrap(),
+            src1: S1::new(((bits >> 5) & 0b11111) as u8).unwrap(),
+            src2: S2::new(((bits >> 10) & 0b11111) as u8).unwrap(),
+        }
+    }
+}
+
+impl<D: Reg, S1: Reg> BinaryOperands<D, S1, U6> {
+    /// Convert to dense 16 bit encoding.
+    pub fn to_bits(self) -> u16 {
+        let dst = self.dst.to_u8();
+        let src1 = self.src1.to_u8();
+        let src2 = u8::from(self.src2);
+        (dst as u16) | ((src1 as u16) << 5) | ((src2 as u16) << 10)
+    }
+
+    /// Convert from dense 16 bit encoding. The topmost bit is ignored.
+    pub fn from_bits(bits: u16) -> Self {
+        Self {
+            dst: D::new((bits & 0b11111) as u8).unwrap(),
+            src1: S1::new(((bits >> 5) & 0b11111) as u8).unwrap(),
+            src2: U6::new(((bits >> 10) & 0b111111) as u8).unwrap(),
         }
     }
 }
@@ -294,10 +321,7 @@ mod tests {
     #[test]
     fn special_x_regs() {
         assert!(XReg::sp.is_special());
-        assert!(XReg::lr.is_special());
-        assert!(XReg::fp.is_special());
         assert!(XReg::spilltmp0.is_special());
-        assert!(XReg::spilltmp1.is_special());
     }
 
     #[test]
@@ -319,8 +343,8 @@ mod tests {
                         src2: XReg::new(src2).unwrap(),
                     };
                     assert_eq!(operands.to_bits(), i);
-                    assert_eq!(BinaryOperands::from_bits(i), operands);
-                    assert_eq!(BinaryOperands::from_bits(0x8000 | i), operands);
+                    assert_eq!(BinaryOperands::<XReg>::from_bits(i), operands);
+                    assert_eq!(BinaryOperands::<XReg>::from_bits(0x8000 | i), operands);
                     i += 1;
                 }
             }

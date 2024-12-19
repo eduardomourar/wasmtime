@@ -1,4 +1,4 @@
-use crate::{wasm_unsupported, WasmResult};
+use crate::{wasm_unsupported, Tunables, WasmResult};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use core::{fmt, ops::Range};
@@ -405,7 +405,7 @@ impl EngineOrModuleTypeIndex {
 
 /// WebAssembly heap type -- equivalent of `wasmparser`'s HeapType
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing variants")]
 pub enum WasmHeapType {
     // External types.
     Extern,
@@ -885,27 +885,50 @@ impl TypeTrace for WasmStructType {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "self-describing type")]
+pub struct WasmCompositeType {
+    /// The type defined inside the composite type.
+    pub inner: WasmCompositeInnerType,
+    /// Is the composite type shared? This is part of the
+    /// shared-everything-threads proposal.
+    pub shared: bool,
+}
+
+impl fmt::Display for WasmCompositeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.shared {
+            write!(f, "(shared ")?;
+        }
+        fmt::Display::fmt(&self.inner, f)?;
+        if self.shared {
+            write!(f, ")")?;
+        }
+        Ok(())
+    }
+}
+
 /// A function, array, or struct type.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[allow(missing_docs)]
-pub enum WasmCompositeType {
+#[allow(missing_docs, reason = "self-describing variants")]
+pub enum WasmCompositeInnerType {
     Array(WasmArrayType),
     Func(WasmFuncType),
     Struct(WasmStructType),
 }
 
-impl fmt::Display for WasmCompositeType {
+impl fmt::Display for WasmCompositeInnerType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WasmCompositeType::Array(ty) => fmt::Display::fmt(ty, f),
-            WasmCompositeType::Func(ty) => fmt::Display::fmt(ty, f),
-            WasmCompositeType::Struct(ty) => fmt::Display::fmt(ty, f),
+            Self::Array(ty) => fmt::Display::fmt(ty, f),
+            Self::Func(ty) => fmt::Display::fmt(ty, f),
+            Self::Struct(ty) => fmt::Display::fmt(ty, f),
         }
     }
 }
 
-#[allow(missing_docs)]
-impl WasmCompositeType {
+#[allow(missing_docs, reason = "self-describing functions")]
+impl WasmCompositeInnerType {
     #[inline]
     pub fn is_array(&self) -> bool {
         matches!(self, Self::Array(_))
@@ -914,7 +937,7 @@ impl WasmCompositeType {
     #[inline]
     pub fn as_array(&self) -> Option<&WasmArrayType> {
         match self {
-            WasmCompositeType::Array(f) => Some(f),
+            Self::Array(f) => Some(f),
             _ => None,
         }
     }
@@ -932,7 +955,7 @@ impl WasmCompositeType {
     #[inline]
     pub fn as_func(&self) -> Option<&WasmFuncType> {
         match self {
-            WasmCompositeType::Func(f) => Some(f),
+            Self::Func(f) => Some(f),
             _ => None,
         }
     }
@@ -950,7 +973,7 @@ impl WasmCompositeType {
     #[inline]
     pub fn as_struct(&self) -> Option<&WasmStructType> {
         match self {
-            WasmCompositeType::Struct(f) => Some(f),
+            Self::Struct(f) => Some(f),
             _ => None,
         }
     }
@@ -966,10 +989,10 @@ impl TypeTrace for WasmCompositeType {
     where
         F: FnMut(EngineOrModuleTypeIndex) -> Result<(), E>,
     {
-        match self {
-            WasmCompositeType::Array(a) => a.trace(func),
-            WasmCompositeType::Func(f) => f.trace(func),
-            WasmCompositeType::Struct(a) => a.trace(func),
+        match &self.inner {
+            WasmCompositeInnerType::Array(a) => a.trace(func),
+            WasmCompositeInnerType::Func(f) => f.trace(func),
+            WasmCompositeInnerType::Struct(a) => a.trace(func),
         }
     }
 
@@ -977,10 +1000,10 @@ impl TypeTrace for WasmCompositeType {
     where
         F: FnMut(&mut EngineOrModuleTypeIndex) -> Result<(), E>,
     {
-        match self {
-            WasmCompositeType::Array(a) => a.trace_mut(func),
-            WasmCompositeType::Func(f) => f.trace_mut(func),
-            WasmCompositeType::Struct(a) => a.trace_mut(func),
+        match &mut self.inner {
+            WasmCompositeInnerType::Array(a) => a.trace_mut(func),
+            WasmCompositeInnerType::Func(f) => f.trace_mut(func),
+            WasmCompositeInnerType::Struct(a) => a.trace_mut(func),
         }
     }
 }
@@ -1016,51 +1039,69 @@ impl fmt::Display for WasmSubType {
     }
 }
 
-#[allow(missing_docs)]
+/// Implicitly define all of these helper functions to handle only unshared
+/// types; essentially, these act like `is_unshared_*` functions until shared
+/// support is implemented.
+#[allow(missing_docs, reason = "self-describing functions")]
 impl WasmSubType {
     #[inline]
     pub fn is_func(&self) -> bool {
-        self.composite_type.is_func()
+        self.composite_type.inner.is_func() && !self.composite_type.shared
     }
 
     #[inline]
     pub fn as_func(&self) -> Option<&WasmFuncType> {
-        self.composite_type.as_func()
+        if self.composite_type.shared {
+            None
+        } else {
+            self.composite_type.inner.as_func()
+        }
     }
 
     #[inline]
     pub fn unwrap_func(&self) -> &WasmFuncType {
-        self.composite_type.unwrap_func()
+        assert!(!self.composite_type.shared);
+        self.composite_type.inner.unwrap_func()
     }
 
     #[inline]
     pub fn is_array(&self) -> bool {
-        self.composite_type.is_array()
+        self.composite_type.inner.is_array() && !self.composite_type.shared
     }
 
     #[inline]
     pub fn as_array(&self) -> Option<&WasmArrayType> {
-        self.composite_type.as_array()
+        if self.composite_type.shared {
+            None
+        } else {
+            self.composite_type.inner.as_array()
+        }
     }
 
     #[inline]
     pub fn unwrap_array(&self) -> &WasmArrayType {
-        self.composite_type.unwrap_array()
+        assert!(!self.composite_type.shared);
+        self.composite_type.inner.unwrap_array()
     }
 
     #[inline]
     pub fn is_struct(&self) -> bool {
-        self.composite_type.is_struct()
+        self.composite_type.inner.is_struct() && !self.composite_type.shared
     }
 
     #[inline]
     pub fn as_struct(&self) -> Option<&WasmStructType> {
-        self.composite_type.as_struct()
+        if self.composite_type.shared {
+            None
+        } else {
+            self.composite_type.inner.as_struct()
+        }
     }
 
     #[inline]
     pub fn unwrap_struct(&self) -> &WasmStructType {
-        self.composite_type.unwrap_struct()
+        assert!(!self.composite_type.shared);
+        self.composite_type.inner.unwrap_struct()
     }
 }
 
@@ -1306,7 +1347,6 @@ impl From<GlobalIndex> for EntityIndex {
 
 /// A type of an item in a wasm module where an item is typically something that
 /// can be exported.
-#[allow(missing_docs)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EntityType {
     /// A global variable with the specified content type
@@ -1519,7 +1559,7 @@ impl ConstExpr {
 }
 
 /// The subset of Wasm opcodes that are constant.
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing variants")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ConstOp {
     I32Const(i32),
@@ -1605,7 +1645,7 @@ impl ConstOp {
 
 /// The type that can be used to index into [Memory] and [Table].
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing variants")]
 pub enum IndexType {
     I32,
     I64,
@@ -1613,7 +1653,7 @@ pub enum IndexType {
 
 /// The size range of resizeable storage associated with [Memory] types and [Table] types.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing fields")]
 pub struct Limits {
     pub min: u64,
     pub max: Option<u64>,
@@ -1756,10 +1796,89 @@ impl Memory {
             IndexType::I32 => WASM32_MAX_SIZE,
         }
     }
+
+    /// Returns whether this memory can be implemented with virtual memory on
+    /// a host with `host_page_size_log2`.
+    ///
+    /// When this function returns `true` then it means that signals such as
+    /// SIGSEGV on the host are compatible with wasm and can be used to
+    /// represent out-of-bounds memory accesses.
+    ///
+    /// When this function returns `false` then it means that this memory must,
+    /// for example, have explicit bounds checks. This additionally means that
+    /// virtual memory traps (e.g. SIGSEGV) cannot be relied on to implement
+    /// linear memory semantics.
+    pub fn can_use_virtual_memory(&self, tunables: &Tunables, host_page_size_log2: u8) -> bool {
+        tunables.signals_based_traps && self.page_size_log2 >= host_page_size_log2
+    }
+
+    /// Returns whether this memory is a candidate for bounds check elision
+    /// given the configuration and host page size.
+    ///
+    /// This function determines whether the given compilation configuration and
+    /// hos enables possible bounds check elision for this memory. Bounds checks
+    /// can only be elided if [`Memory::can_use_virtual_memory`] returns `true`
+    /// for example but there are additionally requirements on the index size of
+    /// this memory and the memory reservation in `tunables`.
+    ///
+    /// Currently the only case that supports bounds check elision is when all
+    /// of these apply:
+    ///
+    /// * When [`Memory::can_use_virtual_memory`] returns `true`.
+    /// * This is a 32-bit linear memory (e.g. not 64-bit)
+    /// * `tunables.memory_reservation` is in excess of 4GiB
+    ///
+    /// In this situation all computable addresses fall within the reserved
+    /// space (modulo static offsets factoring in guard pages) so bounds checks
+    /// may be elidable.
+    pub fn can_elide_bounds_check(&self, tunables: &Tunables, host_page_size_log2: u8) -> bool {
+        self.can_use_virtual_memory(tunables, host_page_size_log2)
+            && self.idx_type == IndexType::I32
+            && tunables.memory_reservation >= (1 << 32)
+    }
+
+    /// Returns the static size of this heap in bytes at runtime, if available.
+    ///
+    /// This is only computable when the minimum size equals the maximum size.
+    pub fn static_heap_size(&self) -> Option<u64> {
+        let min = self.minimum_byte_size().ok()?;
+        let max = self.maximum_byte_size().ok()?;
+        if min == max {
+            Some(min)
+        } else {
+            None
+        }
+    }
+
+    /// Returs whether or not the base pointer of this memory is allowed to be
+    /// relocated at runtime.
+    ///
+    /// When this function returns `false` then it means that after the initial
+    /// allocation the base pointer is constant for the entire lifetime of a
+    /// memory. This can enable compiler optimizations, for example.
+    pub fn memory_may_move(&self, tunables: &Tunables) -> bool {
+        // Shared memories cannot ever relocate their base pointer so the
+        // settings configured in the engine must be appropriate for them ahead
+        // of time.
+        if self.shared {
+            return false;
+        }
+
+        // If movement is disallowed in engine configuration, then the answer is
+        // "no".
+        if !tunables.memory_may_move {
+            return false;
+        }
+
+        // If the maximum size of this memory is above the threshold of the
+        // initial memory reservation then the memory may move.
+        let max = self.maximum_byte_size().unwrap_or(u64::MAX);
+        max > tunables.memory_reservation
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing error struct")]
 pub struct SizeOverflow;
 
 impl fmt::Display for SizeOverflow {
@@ -1768,8 +1887,7 @@ impl fmt::Display for SizeOverflow {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for SizeOverflow {}
+impl core::error::Error for SizeOverflow {}
 
 impl From<wasmparser::MemoryType> for Memory {
     fn from(ty: wasmparser::MemoryType) -> Memory {
@@ -1813,7 +1931,7 @@ impl From<wasmparser::TagType> for Tag {
 }
 
 /// Helpers used to convert a `wasmparser` type to a type in this crate.
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing functions")]
 pub trait TypeConvert {
     /// Converts a wasmparser table type into a wasmtime type
     fn convert_global_type(&self, ty: &wasmparser::GlobalType) -> Global {
@@ -1849,20 +1967,23 @@ pub trait TypeConvert {
     }
 
     fn convert_composite_type(&self, ty: &wasmparser::CompositeType) -> WasmCompositeType {
-        assert!(!ty.shared);
-        match &ty.inner {
+        let inner = match &ty.inner {
             wasmparser::CompositeInnerType::Func(f) => {
-                WasmCompositeType::Func(self.convert_func_type(f))
+                WasmCompositeInnerType::Func(self.convert_func_type(f))
             }
             wasmparser::CompositeInnerType::Array(a) => {
-                WasmCompositeType::Array(self.convert_array_type(a))
+                WasmCompositeInnerType::Array(self.convert_array_type(a))
             }
             wasmparser::CompositeInnerType::Struct(s) => {
-                WasmCompositeType::Struct(self.convert_struct_type(s))
+                WasmCompositeInnerType::Struct(self.convert_struct_type(s))
             }
             wasmparser::CompositeInnerType::Cont(_) => {
                 unimplemented!("continuation types")
             }
+        };
+        WasmCompositeType {
+            inner,
+            shared: ty.shared,
         }
     }
 

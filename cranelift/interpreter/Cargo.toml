@@ -1,6 +1,6 @@
 [package]
 name = "cranelift-interpreter"
-version = "0.114.0"
+version = "0.116.0"
 authors = ["The Cranelift Project Developers"]
 description = "Interpret Cranelift IR"
 repository = "https://github.com/bytecodealliance/wasmtime"
@@ -22,7 +22,7 @@ smallvec = { workspace = true }
 thiserror = { workspace = true }
 
 [target.x86_64-pc-windows-gnu.dependencies]
-libm = "0.2.4"
+libm = { workspace = true }
 
 [dev-dependencies]
 cranelift-frontend = { workspace = true }

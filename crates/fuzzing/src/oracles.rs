@@ -90,7 +90,7 @@ impl StoreLimits {
             // `memcpy`. As more data is added over time growths get more and
             // more expensive meaning that fuel may not be effective at limiting
             // execution time.
-            remaining_growths: AtomicUsize::new(100),
+            remaining_growths: AtomicUsize::new(1000),
             oom: AtomicBool::new(false),
         }))
     }
@@ -504,23 +504,38 @@ impl<T, U> DiffEqResult<T, U> {
         match (lhs_result, rhs_result) {
             (Ok(lhs_result), Ok(rhs_result)) => DiffEqResult::Success(lhs_result, rhs_result),
 
-            // Both sides failed. If either one hits a stack overflow then that's an
-            // engine defined limit which means we can no longer compare the state
-            // of the two instances, so `None` is returned and nothing else is
-            // compared.
+            // Both sides failed. Check that the trap and state at the time of
+            // failure is the same, when possible.
             (Err(lhs), Err(rhs)) => {
                 let err = match rhs.downcast::<Trap>() {
                     Ok(trap) => trap,
+
+                    // For general, unknown errors, we can't rely on this being
+                    // a deterministic Wasm failure that both engines handled
+                    // identically, leaving Wasm in identical states. We could
+                    // just as easily be hitting engine-specific failures, like
+                    // different implementation-defined limits. So simply report
+                    // failure and move on to the next test.
                     Err(err) => {
                         log::debug!("rhs failed: {err:?}");
                         return DiffEqResult::Failed;
                     }
                 };
-                let poisoned = err == Trap::StackOverflow || lhs_engine.is_stack_overflow(&lhs);
 
+                // Even some traps are nondeterministic, and we can't rely on
+                // the errors matching or leaving Wasm in the same state.
+                let poisoned =
+                    // Allocations being too large for the GC are
+                    // implementation-defined.
+                    err == Trap::AllocationTooLarge
+                    // Stack size, and therefore when overflow happens, is
+                    // implementation-defined.
+                    || err == Trap::StackOverflow
+                    || lhs_engine.is_stack_overflow(&lhs);
                 if poisoned {
                     return DiffEqResult::Poisoned;
                 }
+
                 lhs_engine.assert_error_match(&err, &lhs);
                 DiffEqResult::Failed
             }
@@ -625,9 +640,21 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
 /// Executes the wast `test` with the `config` specified.
 ///
 /// Ensures that wast tests pass regardless of the `Config`.
-pub fn wast_test(fuzz_config: generators::Config, test: generators::WastTest) {
+pub fn wast_test(mut fuzz_config: generators::Config, test: generators::WastTest) {
     crate::init_fuzzing();
-    if !fuzz_config.is_wast_test_compliant() {
+    let test = &test.test;
+
+    // Discard tests that allocate a lot of memory as we don't want to OOM the
+    // fuzzer and we also limit memory growth which would cause the test to
+    // fail.
+    if test.config.hogs_memory.unwrap_or(false) {
+        return;
+    }
+
+    // Transform `fuzz_config` to be valid for `test` and make sure that this
+    // test is supposed to pass.
+    let wast_config = fuzz_config.make_wast_test_compliant(test);
+    if test.should_fail(&wast_config) {
         return;
     }
 
@@ -639,16 +666,16 @@ pub fn wast_test(fuzz_config: generators::Config, test: generators::WastTest) {
         }
     }
 
-    log::debug!("running {:?}", test.file);
+    log::debug!("running {:?}", test.path);
     let mut wast_context = WastContext::new(fuzz_config.to_store());
     wast_context
         .register_spectest(&wasmtime_wast::SpectestConfig {
-            use_shared_memory: false,
+            use_shared_memory: true,
             suppress_prints: true,
         })
         .unwrap();
     wast_context
-        .run_buffer(test.file, test.contents.as_bytes())
+        .run_buffer(test.path.to_str().unwrap(), test.contents.as_bytes())
         .unwrap();
 }
 
@@ -961,7 +988,7 @@ pub fn dynamic_component_api_target(input: &mut arbitrary::Unstructured) -> arbi
     while input.arbitrary()? {
         let params = param_tys
             .iter()
-            .map(|ty| component_types::arbitrary_val(ty, input))
+            .map(|(_, ty)| component_types::arbitrary_val(ty, input))
             .collect::<arbitrary::Result<Vec<_>>>()?;
         let results = result_tys
             .iter()
@@ -1250,7 +1277,8 @@ mod tests {
             | WasmFeatures::WIDE_ARITHMETIC
             | WasmFeatures::MEMORY64
             | WasmFeatures::GC_TYPES
-            | WasmFeatures::CUSTOM_PAGE_SIZES;
+            | WasmFeatures::CUSTOM_PAGE_SIZES
+            | WasmFeatures::EXTENDED_CONST;
 
         // All other features that wasmparser supports, which is presumably a
         // superset of the features that wasm-smith supports, are listed here as
