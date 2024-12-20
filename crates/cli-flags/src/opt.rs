@@ -47,7 +47,7 @@ macro_rules! wasmtime_option_group {
         }
 
         #[derive(Clone, Debug,PartialEq)]
-        #[allow(non_camel_case_types)]
+        #[expect(non_camel_case_types, reason = "macro-generated code")]
         enum $option {
             $(
                 $opt($payload),
@@ -374,6 +374,20 @@ impl WasmtimeOptionValue for wasmtime::OptLevel {
     }
 }
 
+impl WasmtimeOptionValue for wasmtime::RegallocAlgorithm {
+    const VAL_HELP: &'static str = "=backtracking|single-pass";
+    fn parse(val: Option<&str>) -> Result<Self> {
+        match String::parse(val)?.as_str() {
+            "backtracking" => Ok(wasmtime::RegallocAlgorithm::Backtracking),
+            "single-pass" => Ok(wasmtime::RegallocAlgorithm::SinglePass),
+            other => bail!(
+                "unknown regalloc algorithm`{}`, only backtracking,single-pass accepted",
+                other
+            ),
+        }
+    }
+}
+
 impl WasmtimeOptionValue for wasmtime::Strategy {
     const VAL_HELP: &'static str = "=winch|cranelift";
     fn parse(val: Option<&str>) -> Result<Self> {
@@ -381,6 +395,17 @@ impl WasmtimeOptionValue for wasmtime::Strategy {
             "cranelift" => Ok(wasmtime::Strategy::Cranelift),
             "winch" => Ok(wasmtime::Strategy::Winch),
             other => bail!("unknown compiler `{other}` only `cranelift` and `winch` accepted",),
+        }
+    }
+}
+
+impl WasmtimeOptionValue for wasmtime::Collector {
+    const VAL_HELP: &'static str = "=drc|null";
+    fn parse(val: Option<&str>) -> Result<Self> {
+        match String::parse(val)?.as_str() {
+            "drc" => Ok(wasmtime::Collector::DeferredReferenceCounting),
+            "null" => Ok(wasmtime::Collector::Null),
+            other => bail!("unknown collector `{other}` only `drc` and `null` accepted",),
         }
     }
 }

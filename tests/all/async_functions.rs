@@ -352,9 +352,8 @@ async fn async_with_pooling_stacks() {
     let mut config = Config::new();
     config.async_support(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let engine = Engine::new(&config).unwrap();
     let mut store = Store::new(&engine, ());
@@ -377,9 +376,8 @@ async fn async_host_func_with_pooling_stacks() -> Result<()> {
     let mut config = Config::new();
     config.async_support(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let mut store = Store::new(&Engine::new(&config)?, ());
     let mut linker = Linker::new(store.engine());
@@ -411,7 +409,7 @@ async fn async_mpk_protection() -> Result<()> {
     let mut config = Config::new();
     config.async_support(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
-    config.static_memory_maximum_size(1 << 26);
+    config.memory_reservation(1 << 26);
     config.epoch_interruption(true);
     let engine = Engine::new(&config)?;
 

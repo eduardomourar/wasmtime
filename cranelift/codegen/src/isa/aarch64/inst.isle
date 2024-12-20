@@ -1289,6 +1289,12 @@
             (Size64 64)
             (Size128 128)))
 
+;; Difference (32 - ty), useful for narrow calculations with 32-bit
+;; instructions.
+(decl diff_from_32 (Type) u8)
+(rule (diff_from_32 $I8) 24)
+(rule (diff_from_32 $I16) 16)
+
 (type ScalarSize extern
       (enum Size8
             Size16
@@ -1986,10 +1992,10 @@
 (decl nzcv (bool bool bool bool) NZCV)
 (extern constructor nzcv nzcv)
 
-(decl cond_br_zero (Reg) CondBrKind)
+(decl cond_br_zero (Reg OperandSize) CondBrKind)
 (extern constructor cond_br_zero cond_br_zero)
 
-(decl cond_br_not_zero (Reg) CondBrKind)
+(decl cond_br_not_zero (Reg OperandSize) CondBrKind)
 (extern constructor cond_br_not_zero cond_br_not_zero)
 
 (decl cond_br_cond (Cond) CondBrKind)
@@ -2451,7 +2457,7 @@
         (fpu_csel $F32 cond if_true if_false))
 
 (rule 1 (fpu_csel $F16 cond if_true if_false)
-        (if-let $true (use_fp16))
+        (if-let true (use_fp16))
         (let ((dst WritableReg (temp_writable_reg $F16)))
           (ConsumesFlags.ConsumesFlagsReturnsReg
            (MInst.FpuCSel16 dst if_true if_false cond)
@@ -2504,7 +2510,7 @@
             (_ Unit (emit (MInst.MovToFpu dst x size))))
         dst))
 (rule 1 (mov_to_fpu x (ScalarSize.Size16))
-        (if-let $false (use_fp16))
+        (if-let false (use_fp16))
         (mov_to_fpu x (ScalarSize.Size32)))
 
 ;; Helper for emitting `MInst.FpuMoveFPImm` instructions.
@@ -3508,19 +3514,19 @@
        Zero
        NonZero))
 
-(decl zero_cond_to_cond_br (ZeroCond Reg) CondBrKind)
-(rule (zero_cond_to_cond_br (ZeroCond.Zero) reg)
-      (cond_br_zero reg))
+(decl zero_cond_to_cond_br (ZeroCond Reg OperandSize) CondBrKind)
+(rule (zero_cond_to_cond_br (ZeroCond.Zero) reg size)
+      (cond_br_zero reg size))
 
-(rule (zero_cond_to_cond_br (ZeroCond.NonZero) reg)
-      (cond_br_not_zero reg))
+(rule (zero_cond_to_cond_br (ZeroCond.NonZero) reg size)
+      (cond_br_not_zero reg size))
 
 (decl trap_if_val (ZeroCond Value TrapCode) InstOutput)
 (rule (trap_if_val zero_cond val @ (value_type (fits_in_64 _)) trap_code)
       (let ((reg Reg (put_in_reg_zext64 val)))
       (side_effect
        (SideEffectNoResult.Inst
-        (MInst.TrapIf (zero_cond_to_cond_br zero_cond reg) trap_code)))))
+        (MInst.TrapIf (zero_cond_to_cond_br zero_cond reg (operand_size $I64)) trap_code)))))
 
 (rule -1 (trap_if_val zero_cond val @ (value_type $I128) trap_code)
   (let ((c ValueRegs (put_in_regs val))
@@ -3529,7 +3535,7 @@
         (c_test Reg (orr $I64 c_lo c_hi)))
       (side_effect
        (SideEffectNoResult.Inst
-        (MInst.TrapIf (zero_cond_to_cond_br zero_cond c_test) trap_code)))))
+        (MInst.TrapIf (zero_cond_to_cond_br zero_cond c_test (operand_size $I64)) trap_code)))))
 
 ;; Immediate value helpers ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -3592,12 +3598,17 @@
        (orr_imm ty (zero_reg) n)
        m k k))
 
-(decl load_constant64_full (Type ImmExtend u64) Reg)
-(extern constructor load_constant64_full load_constant64_full)
+(decl load_constant_full (Type ImmExtend OperandSize u64) Reg)
+(extern constructor load_constant_full load_constant_full)
+
+;; Fallback for integral 32-bit constants
+(rule (imm (fits_in_32 (integral_ty ty)) extend n)
+      (load_constant_full ty extend (operand_size $I32) n))
 
 ;; Fallback for integral 64-bit constants
-(rule (imm (integral_ty ty) extend n)
-      (load_constant64_full ty extend n))
+(rule -1 (imm (integral_ty $I64) extend n)
+      (load_constant_full $I64 extend (operand_size $I64) n))
+
 
 ;; Sign extension helpers ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -3610,7 +3621,7 @@
            (conv_to 64 arg)))))
 (decl put_in_reg_sext32 (Value) Reg)
 (rule -1 (put_in_reg_sext32 val @ (value_type (fits_in_32 ty)))
-      (extend val $true (ty_bits ty) 32))
+      (extend val true (ty_bits ty) 32))
 
 ;; 32/64-bit passthrough.
 (rule (put_in_reg_sext32 val @ (value_type $I32)) val)
@@ -3625,7 +3636,7 @@
            (conv_to 64 arg)))))
 (decl put_in_reg_zext32 (Value) Reg)
 (rule -1 (put_in_reg_zext32 val @ (value_type (fits_in_32 ty)))
-      (extend val $false (ty_bits ty) 32))
+      (extend val false (ty_bits ty) 32))
 
 ;; 32/64-bit passthrough.
 (rule (put_in_reg_zext32 val @ (value_type $I32)) val)
@@ -3636,7 +3647,7 @@
       (provide (= (sign_ext 64 x) result)))
 (decl put_in_reg_sext64 (Value) Reg)
 (rule 1 (put_in_reg_sext64 val @ (value_type (fits_in_32 ty)))
-      (extend val $true (ty_bits ty) 64))
+      (extend val true (ty_bits ty) 64))
 
 ;; 64-bit passthrough.
 (rule (put_in_reg_sext64 val @ (value_type $I64)) val)
@@ -3646,16 +3657,16 @@
       (provide (= result (zero_ext 64 x))))
 (decl put_in_reg_zext64 (Value) Reg)
 (rule 1 (put_in_reg_zext64 val @ (value_type (fits_in_32 ty)))
-      (extend val $false (ty_bits ty) 64))
+      (extend val false (ty_bits ty) 64))
 
 ;; 64-bit passthrough.
 (rule (put_in_reg_zext64 val @ (value_type $I64)) val)
 
 ;; Misc instruction helpers ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(decl trap_if_zero_divisor (Reg) Reg)
-(rule (trap_if_zero_divisor reg)
-      (let ((_ Unit (emit (MInst.TrapIf (cond_br_zero reg) (trap_code_division_by_zero)))))
+(decl trap_if_zero_divisor (Reg OperandSize) Reg)
+(rule (trap_if_zero_divisor reg size)
+      (let ((_ Unit (emit (MInst.TrapIf (cond_br_zero reg size ) (trap_code_division_by_zero)))))
         reg))
 
 (decl size_from_ty (Type) OperandSize)
@@ -3664,31 +3675,38 @@
 
 ;; Check for signed overflow. The only case is min_value / -1.
 ;; The following checks must be done in 32-bit or 64-bit, depending
-;; on the input type.
-(spec (trap_if_div_overflow ty x y)
-      (provide (= x result)
-      (if (= ty 32)
-          (not (and (= #x00000000 (extract 31 0 y))
-                 (= #x80000000 (extract 31 0 y))))
-          (not (and (= #x0000000000000000 y)
-                    (= #x8000000000000000 y))))))
-(decl trap_if_div_overflow (Type Reg Reg) Reg)
-(rule (trap_if_div_overflow ty x y)
+;; on the input type. For 8- and 16- bit, the check for x == min_value
+;; must use a possibly-shifted value, xcheck, to overflow as expected.
+(decl trap_if_div_overflow (Type Reg Reg Reg) Reg)
+(rule (trap_if_div_overflow ty xcheck x y)
       (let (
           ;; Check RHS is -1.
           (_ Unit (emit (MInst.AluRRImm12 (ALUOp.AddS) (operand_size ty) (writable_zero_reg) y (u8_into_imm12 1))))
 
-          ;; Check LHS is min_value, by subtracting 1 and branching if
-          ;; there is overflow.
+          ;; Check LHS is min_value, by subtracting 1 from the possibly-shifted
+          ;; value and branching if there is overflow.
           (_ Unit (emit (MInst.CCmpImm (size_from_ty ty)
-                                       x
+                                       xcheck
                                        (u8_into_uimm5 1)
-                                       (nzcv $false $false $false $false)
+                                       (nzcv false false false false)
                                        (Cond.Eq))))
           (_ Unit (emit (MInst.TrapIf (cond_br_cond (Cond.Vs))
                                       (trap_code_integer_overflow))))
         )
         x))
+
+;; In the cases narrower than a register width, subtracting 1 from the
+;; min_value will not cause overflow (e.g., I8's min_value of -128 stored in
+;; a 32-bit register produces -129 with no overflow). However, if we left shift
+;; x by (32 - ty), we then produce the 32-bit min_value for the respective min
+;; values of I8 and I16.
+;; E.g., I8's 0x00000080 left-shifted by 24 is 0x80000000, which overflows.
+(decl intmin_check (Type Reg) Reg)
+(rule intmin_check_fits_in_16 (intmin_check (fits_in_16 ty) x)
+      (alu_rr_imm_shift (ALUOp.Lsl) ty x (imm_shift_from_u8 (diff_from_32 ty))))
+
+;; In the I32 or I64 case, checking x itself against the min_value is fine.
+(rule -1 (intmin_check ty x) x)
 
 ;; Check for unsigned overflow.
 (decl trap_if_overflow (ProducesFlags TrapCode) Reg)
@@ -3857,10 +3875,10 @@
 ;; extension must happen before the shift. This will pattern-match the shift
 ;; first and then if that succeeds afterwards try to find an extend.
 (rule 6 (amode_no_more_iconst ty (iadd x (ishl y (iconst (u64_from_imm64 n)))) offset)
-        (if-let $true (u64_eq (ty_bytes ty) (u64_shl 1 n)))
+        (if-let true (u64_eq (ty_bytes ty) (u64_shl 1 n)))
         (amode_reg_scaled (amode_add x offset) y))
 (rule 7 (amode_no_more_iconst ty (iadd (ishl y (iconst (u64_from_imm64 n))) x) offset)
-        (if-let $true (u64_eq (ty_bytes ty) (u64_shl 1 n)))
+        (if-let true (u64_eq (ty_bytes ty) (u64_shl 1 n)))
         (amode_reg_scaled (amode_add x offset) y))
 
 (decl amode_reg_scaled (Reg Value) AMode)
@@ -3922,11 +3940,11 @@
 ;; in their most significant bits).
 (decl constant_f16 (u16) Reg)
 (rule 3 (constant_f16 n)
-        (if-let $false (use_fp16))
+        (if-let false (use_fp16))
         (constant_f32 n))
 (rule 2 (constant_f16 0)
         (vec_dup_imm (asimd_mov_mod_imm_zero (ScalarSize.Size32))
-                     $false
+                     false
                      (VectorSize.Size32x2)))
 (rule 1 (constant_f16 n)
         (if-let imm (asimd_fp_mod_imm_from_u64 n (ScalarSize.Size16)))
@@ -3942,13 +3960,13 @@
 (decl constant_f32 (u32) Reg)
 (rule 3 (constant_f32 0)
         (vec_dup_imm (asimd_mov_mod_imm_zero (ScalarSize.Size32))
-                     $false
+                     false
                      (VectorSize.Size32x2)))
 (rule 2 (constant_f32 n)
         (if-let imm (asimd_fp_mod_imm_from_u64 n (ScalarSize.Size32)))
         (fpu_move_fp_imm imm (ScalarSize.Size32)))
 (rule 1 (constant_f32 (u32_as_u16 n))
-        (if-let $true (use_fp16))
+        (if-let true (use_fp16))
         (constant_f16 n))
 (rule (constant_f32 n)
       (mov_to_fpu (imm $I32 (ImmExtend.Zero) n) (ScalarSize.Size32)))
@@ -3963,7 +3981,7 @@
 (decl constant_f64 (u64) Reg)
 (rule 4 (constant_f64 0)
         (vec_dup_imm (asimd_mov_mod_imm_zero (ScalarSize.Size32))
-                     $false
+                     false
                      (VectorSize.Size32x2)))
 (rule 3 (constant_f64 n)
         (if-let imm (asimd_fp_mod_imm_from_u64 n (ScalarSize.Size64)))
@@ -3983,7 +4001,7 @@
 (decl constant_f128 (u128) Reg)
 (rule 3 (constant_f128 0)
         (vec_dup_imm (asimd_mov_mod_imm_zero (ScalarSize.Size8))
-                     $false
+                     false
                      (VectorSize.Size8x16)))
 
 ;; If the upper 64-bits are all zero then defer to `constant_f64`.
@@ -4021,29 +4039,29 @@
 ;; negated or not.
 (rule 4 (splat_const n size)
         (if-let imm (asimd_mov_mod_imm_from_u64 n (vector_lane_size size)))
-        (vec_dup_imm imm $false size))
+        (vec_dup_imm imm false size))
 (rule 3 (splat_const n size)
         (if-let imm (asimd_mov_mod_imm_from_u64 (u64_not n) (vector_lane_size size)))
-        (vec_dup_imm imm $true size))
+        (vec_dup_imm imm true size))
 
 ;; Special case a 32-bit splat where an immediate can be created by
 ;; concatenating the 32-bit constant into a 64-bit value
 (rule 2 (splat_const n (VectorSize.Size32x4))
         (if-let imm (asimd_mov_mod_imm_from_u64 (u64_or n (u64_shl n 32)) (ScalarSize.Size64)))
-        (vec_dup_imm imm $false (VectorSize.Size64x2)))
+        (vec_dup_imm imm false (VectorSize.Size64x2)))
 (rule 2 (splat_const n (VectorSize.Size32x2))
         (if-let imm (asimd_mov_mod_imm_from_u64 (u64_or n (u64_shl n 32)) (ScalarSize.Size64)))
-        (fpu_extend (vec_dup_imm imm $false (VectorSize.Size64x2)) (ScalarSize.Size64)))
+        (fpu_extend (vec_dup_imm imm false (VectorSize.Size64x2)) (ScalarSize.Size64)))
 
 (rule 1 (splat_const n size)
-        (if-let $true (vec_dup_fp_imm_supports_lane_size (vector_lane_size size)))
+        (if-let true (vec_dup_fp_imm_supports_lane_size (vector_lane_size size)))
         (if-let imm (asimd_fp_mod_imm_from_u64 n (vector_lane_size size)))
         (vec_dup_fp_imm imm size))
 
 (decl pure vec_dup_fp_imm_supports_lane_size (ScalarSize) bool)
-(rule 1 (vec_dup_fp_imm_supports_lane_size (ScalarSize.Size32)) $true)
-(rule 1 (vec_dup_fp_imm_supports_lane_size (ScalarSize.Size64)) $true)
-(rule (vec_dup_fp_imm_supports_lane_size _) $false)
+(rule 1 (vec_dup_fp_imm_supports_lane_size (ScalarSize.Size32)) true)
+(rule 1 (vec_dup_fp_imm_supports_lane_size (ScalarSize.Size64)) true)
+(rule (vec_dup_fp_imm_supports_lane_size _) false)
 
 ;; The base case for splat is to use `vec_dup` with the immediate loaded into a
 ;; register.
@@ -4268,7 +4286,7 @@
 ;; accepting a boolean (whether the type is signed), input type,
 ;; output type, and registers containing the source and minimum bound.
 (decl fpu_to_int_underflow_check (bool Type Type Reg Reg) Reg)
-(rule (fpu_to_int_underflow_check $true $F32 (fits_in_16 out_ty) src min)
+(rule (fpu_to_int_underflow_check true $F32 (fits_in_16 out_ty) src min)
       (let ((r ValueRegs
                   (with_flags (fpu_cmp (ScalarSize.Size32) src min)
                    (ConsumesFlags.ConsumesFlagsReturnsReg
@@ -4276,7 +4294,7 @@
                         (trap_code_integer_overflow))
                     src))))
        (value_regs_get r 0)))
-(rule (fpu_to_int_underflow_check $true $F64 (fits_in_32 out_ty) src min)
+(rule (fpu_to_int_underflow_check true $F64 (fits_in_32 out_ty) src min)
       (let ((r ValueRegs
                   (with_flags (fpu_cmp (ScalarSize.Size64) src min)
                    (ConsumesFlags.ConsumesFlagsReturnsReg
@@ -4284,7 +4302,7 @@
                         (trap_code_integer_overflow))
                     src))))
        (value_regs_get r 0)))
-(rule -1 (fpu_to_int_underflow_check $true in_ty _out_ty src min)
+(rule -1 (fpu_to_int_underflow_check true in_ty _out_ty src min)
       (let ((r ValueRegs
                   (with_flags (fpu_cmp (scalar_size in_ty) src min)
                    (ConsumesFlags.ConsumesFlagsReturnsReg
@@ -4292,7 +4310,7 @@
                         (trap_code_integer_overflow))
                     src))))
        (value_regs_get r 0)))
-(rule (fpu_to_int_underflow_check $false in_ty _out_ty src min)
+(rule (fpu_to_int_underflow_check false in_ty _out_ty src min)
       (let ((r ValueRegs
                   (with_flags (fpu_cmp (scalar_size in_ty) src min)
                    (ConsumesFlags.ConsumesFlagsReturnsReg
@@ -4339,13 +4357,13 @@
       (fpu_to_int op src))
 (rule 1 (fpu_to_int_cvt_sat op src _ $I32)
       (fpu_to_int op src))
-(rule (fpu_to_int_cvt_sat op src $false (fits_in_16 out_ty))
+(rule (fpu_to_int_cvt_sat op src false (fits_in_16 out_ty))
       (let ((result Reg (fpu_to_int op src))
             (max Reg (imm out_ty (ImmExtend.Zero) (ty_mask out_ty))))
        (with_flags_reg
         (cmp (OperandSize.Size32) result max)
         (csel (Cond.Hi) max result))))
-(rule (fpu_to_int_cvt_sat op src $true (fits_in_16 out_ty))
+(rule (fpu_to_int_cvt_sat op src true (fits_in_16 out_ty))
       (let ((result Reg (fpu_to_int op src))
             (max Reg (signed_max out_ty))
             (min Reg (signed_min out_ty))
@@ -4758,13 +4776,13 @@
 ;;     ==> A > B
 (rule lower_icmp_const_32_64_ugte (lower_icmp_const (IntCC.UnsignedGreaterThanOrEqual) a b ty)
       (if (ty_int_ref_scalar_64 ty))
-      (if-let $true (u64_is_odd b))
+      (if-let true (u64_is_odd b))
       (if-let (imm12_from_u64 imm) (u64_sub b 1))
   (flags_and_cc (cmp_imm (operand_size ty) a imm) (IntCC.UnsignedGreaterThan)))
 
 (rule lower_icmp_const_32_64_sgte (lower_icmp_const (IntCC.SignedGreaterThanOrEqual) a b ty)
       (if (ty_int_ref_scalar_64 ty))
-      (if-let $true (u64_is_odd b))
+      (if-let true (u64_is_odd b))
       (if-let (imm12_from_u64 imm) (u64_sub b 1))
   (flags_and_cc (cmp_imm (operand_size ty) a imm) (IntCC.SignedGreaterThan)))
 
@@ -4798,7 +4816,7 @@
             (rhs_hi Reg (value_regs_get rhs 1))
             (cmp_inst ProducesFlags (cmp (OperandSize.Size64) lhs_lo rhs_lo)))
        (ccmp (OperandSize.Size64) lhs_hi rhs_hi
-        (nzcv $false $false $false $false) (Cond.Eq) cmp_inst)))
+        (nzcv false false false false) (Cond.Eq) cmp_inst)))
 
 (rule (lower_icmp (IntCC.Equal) lhs rhs $I128)
       (flags_and_cc (lower_icmp_i128_eq_ne lhs rhs) (IntCC.Equal)))

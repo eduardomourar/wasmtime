@@ -1,15 +1,13 @@
 use crate::prelude::*;
-use crate::runtime::vm::{RuntimeLinearMemory, VMMemoryImport};
+use crate::runtime::vm::VMMemoryImport;
 use crate::store::{StoreData, StoreOpaque, Stored};
 use crate::trampoline::generate_memory_export;
 use crate::Trap;
 use crate::{AsContext, AsContextMut, Engine, MemoryType, StoreContext, StoreContextMut};
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::ops::Range;
 use core::slice;
 use core::time::Duration;
-use wasmtime_environ::MemoryPlan;
 
 pub use crate::runtime::vm::WaitResult;
 
@@ -294,7 +292,7 @@ impl Memory {
     /// ```
     pub fn ty(&self, store: impl AsContext) -> MemoryType {
         let store = store.as_context();
-        let ty = &store[self.0].memory.memory;
+        let ty = &store[self.0].memory;
         MemoryType::from_wasmtime_memory(&ty)
     }
 
@@ -499,7 +497,7 @@ impl Memory {
     }
 
     pub(crate) fn _page_size(&self, store: &StoreOpaque) -> u64 {
-        store[self.0].memory.memory.page_size()
+        store[self.0].memory.page_size()
     }
 
     /// Returns the log2 of this memory's page size, in bytes.
@@ -519,7 +517,7 @@ impl Memory {
     }
 
     pub(crate) fn _page_size_log2(&self, store: &StoreOpaque) -> u8 {
-        store[self.0].memory.memory.page_size_log2
+        store[self.0].memory.page_size_log2
     }
 
     /// Grows this WebAssembly memory by `delta` pages.
@@ -632,7 +630,7 @@ impl Memory {
     }
 
     pub(crate) fn wasmtime_ty<'a>(&self, store: &'a StoreData) -> &'a wasmtime_environ::Memory {
-        &store[self.0].memory.memory
+        &store[self.0].memory
     }
 
     pub(crate) fn vmimport(&self, store: &StoreOpaque) -> crate::runtime::vm::VMMemoryImport {
@@ -677,11 +675,11 @@ pub unsafe trait LinearMemory: Send + Sync + 'static {
     /// Returns the number of allocated bytes which are accessible at this time.
     fn byte_size(&self) -> usize;
 
-    /// Returns the maximum number of bytes the memory can grow to.
+    /// Returns byte capacity of this linear memory's current allocation.
     ///
-    /// Returns `None` if the memory is unbounded, or `Some` if memory cannot
-    /// grow beyond a specified limit.
-    fn maximum_byte_size(&self) -> Option<usize>;
+    /// Growth up to this value should not relocate the linear memory base
+    /// pointer.
+    fn byte_capacity(&self) -> usize;
 
     /// Grows this memory to have the `new_size`, in bytes, specified.
     ///
@@ -692,10 +690,6 @@ pub unsafe trait LinearMemory: Send + Sync + 'static {
 
     /// Return the allocated memory as a mutable pointer to u8.
     fn as_ptr(&self) -> *mut u8;
-
-    /// Returns the range of native addresses that WebAssembly can natively
-    /// access from this linear memory, including guard pages.
-    fn wasm_accessible(&self) -> Range<usize>;
 }
 
 /// A memory creator. Can be used to provide a memory creator
@@ -808,9 +802,9 @@ impl SharedMemory {
         debug_assert!(ty.maximum().is_some());
 
         let tunables = engine.tunables();
-        let plan = MemoryPlan::for_memory(*ty.wasmtime_memory(), tunables);
-        let page_size_log2 = plan.memory.page_size_log2;
-        let memory = crate::runtime::vm::SharedMemory::new(plan)?;
+        let ty = ty.wasmtime_memory();
+        let page_size_log2 = ty.page_size_log2;
+        let memory = crate::runtime::vm::SharedMemory::new(ty, tunables)?;
 
         Ok(Self {
             vm: memory,
@@ -1049,17 +1043,14 @@ mod tests {
     #[test]
     fn respect_tunables() {
         let mut cfg = Config::new();
-        cfg.static_memory_maximum_size(0)
-            .dynamic_memory_guard_size(0);
+        cfg.memory_reservation(0).memory_guard_size(0);
         let mut store = Store::new(&Engine::new(&cfg).unwrap(), ());
         let ty = MemoryType::new(1, None);
         let mem = Memory::new(&mut store, ty).unwrap();
         let store = store.as_context();
-        assert_eq!(store[mem.0].memory.offset_guard_size, 0);
-        match &store[mem.0].memory.style {
-            wasmtime_environ::MemoryStyle::Dynamic { .. } => {}
-            other => panic!("unexpected style {other:?}"),
-        }
+        let tunables = store.engine().tunables();
+        assert_eq!(tunables.memory_guard_size, 0);
+        assert!(!store[mem.0].memory.can_elide_bounds_check(tunables, 12));
     }
 
     #[test]

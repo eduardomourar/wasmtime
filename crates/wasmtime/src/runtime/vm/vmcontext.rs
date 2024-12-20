@@ -5,7 +5,7 @@ mod vm_host_func_context;
 
 pub use self::vm_host_func_context::VMArrayCallHostFuncContext;
 use crate::prelude::*;
-use crate::runtime::vm::{GcStore, VMGcRef};
+use crate::runtime::vm::{GcStore, InterpreterRef, VMGcRef};
 use crate::store::StoreOpaque;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -37,8 +37,19 @@ use wasmtime_environ::{
 ///
 /// * The capacity of the `ValRaw` buffer. Must always be at least
 ///   `max(len(wasm_params), len(wasm_results))`.
-pub type VMArrayCallFunction =
-    unsafe extern "C" fn(*mut VMOpaqueContext, *mut VMOpaqueContext, *mut ValRaw, usize);
+///
+/// Return value:
+///
+/// * `true` if this call succeeded.
+/// * `false` if this call failed and a trap was recorded in TLS.
+pub type VMArrayCallNative =
+    unsafe extern "C" fn(*mut VMOpaqueContext, *mut VMOpaqueContext, *mut ValRaw, usize) -> bool;
+
+/// An opaque function pointer which might be `VMArrayCallNative` or it might be
+/// pulley bytecode. Requires external knowledge to determine what kind of
+/// function pointer this is.
+#[repr(transparent)]
+pub struct VMArrayCallFunction(VMFunctionBody);
 
 /// A function pointer that exposes the Wasm calling convention.
 ///
@@ -60,7 +71,7 @@ pub struct VMFunctionImport {
 
     /// Function pointer to use when calling this imported function with the
     /// "array" calling convention that `Func::new` et al use.
-    pub array_call: VMArrayCallFunction,
+    pub array_call: NonNull<VMArrayCallFunction>,
 
     /// The VM state associated with this function.
     ///
@@ -436,7 +447,7 @@ impl VMGlobalDefinition {
             WasmValType::I64 => *global.as_i64_mut() = raw.get_i64(),
             WasmValType::F32 => *global.as_f32_bits_mut() = raw.get_f32(),
             WasmValType::F64 => *global.as_f64_bits_mut() = raw.get_f64(),
-            WasmValType::V128 => *global.as_u128_mut() = raw.get_v128(),
+            WasmValType::V128 => global.set_u128(raw.get_v128()),
             WasmValType::Ref(r) => match r.heap_type.top() {
                 WasmHeapTopType::Extern => {
                     let r = VMGcRef::from_raw_u32(raw.get_externref());
@@ -467,7 +478,7 @@ impl VMGlobalDefinition {
             WasmValType::I64 => ValRaw::i64(*self.as_i64()),
             WasmValType::F32 => ValRaw::f32(*self.as_f32_bits()),
             WasmValType::F64 => ValRaw::f64(*self.as_f64_bits()),
-            WasmValType::V128 => ValRaw::v128(*self.as_u128()),
+            WasmValType::V128 => ValRaw::v128(self.get_u128()),
             WasmValType::Ref(r) => match r.heap_type.top() {
                 WasmHeapTopType::Extern => ValRaw::externref(match self.as_gc_ref() {
                     Some(r) => store.gc_store_mut()?.clone_gc_ref(r).as_raw_u32(),
@@ -564,14 +575,20 @@ impl VMGlobalDefinition {
         &mut *(self.storage.as_mut().as_mut_ptr().cast::<u64>())
     }
 
-    /// Return a reference to the value as an u128.
-    pub unsafe fn as_u128(&self) -> &u128 {
-        &*(self.storage.as_ref().as_ptr().cast::<u128>())
+    /// Gets the underlying 128-bit vector value.
+    //
+    // Note that vectors are stored in little-endian format while other types
+    // are stored in native-endian format.
+    pub unsafe fn get_u128(&self) -> u128 {
+        u128::from_le(*(self.storage.as_ref().as_ptr().cast::<u128>()))
     }
 
-    /// Return a mutable reference to the value as an u128.
-    pub unsafe fn as_u128_mut(&mut self) -> &mut u128 {
-        &mut *(self.storage.as_mut().as_mut_ptr().cast::<u128>())
+    /// Sets the 128-bit vector values.
+    //
+    // Note that vectors are stored in little-endian format while other types
+    // are stored in native-endian format.
+    pub unsafe fn set_u128(&mut self, val: u128) {
+        *self.storage.as_mut().as_mut_ptr().cast::<u128>() = val.to_le();
     }
 
     /// Return a reference to the value as u128 bits.
@@ -652,7 +669,7 @@ mod test_vmshared_type_index {
 pub struct VMFuncRef {
     /// Function pointer for this funcref if being called via the "array"
     /// calling convention that `Func::new` et al use.
-    pub array_call: VMArrayCallFunction,
+    pub array_call: NonNull<VMArrayCallFunction>,
 
     /// Function pointer for this funcref if being called via the calling
     /// convention we use when compiling Wasm.
@@ -689,6 +706,81 @@ pub struct VMFuncRef {
 
 unsafe impl Send for VMFuncRef {}
 unsafe impl Sync for VMFuncRef {}
+
+impl VMFuncRef {
+    /// Invokes the `array_call` field of this `VMFuncRef` with the supplied
+    /// arguments.
+    ///
+    /// This will invoke the function pointer in the `array_call` field with:
+    ///
+    /// * the `callee` vmctx as `self.vmctx`
+    /// * the `caller` as `caller` specified here
+    /// * the args pointer as `args_and_results`
+    /// * the args length as `args_and_results`
+    ///
+    /// The `args_and_results` area must be large enough to both load all
+    /// arguments from and store all results to.
+    ///
+    /// Returns whether a trap was recorded in TLS for raising.
+    ///
+    /// # Unsafety
+    ///
+    /// This method is unsafe because it can be called with any pointers. They
+    /// must all be valid for this wasm function call to proceed. For example
+    /// the `caller` must be valid machine code if `pulley` is `None` or it must
+    /// be valid bytecode if `pulley` is `Some`. Additionally `args_and_results`
+    /// must be large enough to handle all the arguments/results for this call.
+    ///
+    /// Note that the unsafety invariants to maintain here are not currently
+    /// exhaustively documented.
+    pub unsafe fn array_call(
+        &self,
+        pulley: Option<InterpreterRef<'_>>,
+        caller: *mut VMOpaqueContext,
+        args_and_results: *mut [ValRaw],
+    ) -> bool {
+        match pulley {
+            Some(vm) => self.array_call_interpreted(vm, caller, args_and_results),
+            None => self.array_call_native(caller, args_and_results),
+        }
+    }
+
+    unsafe fn array_call_interpreted(
+        &self,
+        vm: InterpreterRef<'_>,
+        caller: *mut VMOpaqueContext,
+        args_and_results: *mut [ValRaw],
+    ) -> bool {
+        // If `caller` is actually a `VMArrayCallHostFuncContext` then skip the
+        // interpreter, even though it's available, as `array_call` will be
+        // native code.
+        if (*self.vmctx).magic == wasmtime_environ::VM_ARRAY_CALL_HOST_FUNC_MAGIC {
+            return self.array_call_native(caller, args_and_results);
+        }
+        vm.call(self.array_call.cast(), self.vmctx, caller, args_and_results)
+    }
+
+    unsafe fn array_call_native(
+        &self,
+        caller: *mut VMOpaqueContext,
+        args_and_results: *mut [ValRaw],
+    ) -> bool {
+        union GetNativePointer {
+            native: VMArrayCallNative,
+            ptr: NonNull<VMArrayCallFunction>,
+        }
+        let native = GetNativePointer {
+            ptr: self.array_call,
+        }
+        .native;
+        native(
+            self.vmctx,
+            caller,
+            args_and_results.cast(),
+            args_and_results.len(),
+        )
+    }
+}
 
 #[cfg(test)]
 mod test_vm_func_ref {
@@ -754,9 +846,8 @@ macro_rules! define_builtin_array {
 
     (@ty i32) => (u32);
     (@ty i64) => (u64);
-    (@ty f64) => (f64);
     (@ty u8) => (u8);
-    (@ty reference) => (u32);
+    (@ty bool) => (bool);
     (@ty pointer) => (*mut u8);
     (@ty vmctx) => (*mut VMContext);
 }
@@ -766,8 +857,7 @@ wasmtime_environ::foreach_builtin_function!(define_builtin_array);
 const _: () = {
     assert!(
         mem::size_of::<VMBuiltinFunctionsArray>()
-            == mem::size_of::<usize>()
-                * (BuiltinFunctionIndex::builtin_functions_total_number() as usize)
+            == mem::size_of::<usize>() * (BuiltinFunctionIndex::len() as usize)
     )
 };
 
@@ -775,11 +865,11 @@ const _: () = {
 #[derive(Debug)]
 #[repr(C)]
 pub struct VMRuntimeLimits {
-    /// Current stack limit of the wasm module.
-    ///
-    /// For more information see `crates/cranelift/src/lib.rs`.
-    pub stack_limit: UnsafeCell<usize>,
-
+    // NB: 64-bit integer fields are located first with pointer-sized fields
+    // trailing afterwards. That makes the offsets in this structure easier to
+    // calculate on 32-bit platforms as we don't have to worry about the
+    // alignment of 64-bit integers.
+    //
     /// Indicator of how much fuel has been consumed and is remaining to
     /// WebAssembly.
     ///
@@ -793,6 +883,11 @@ pub struct VMRuntimeLimits {
     /// observed to reach or exceed this value, the guest code will
     /// yield if running asynchronously.
     pub epoch_deadline: UnsafeCell<u64>,
+
+    /// Current stack limit of the wasm module.
+    ///
+    /// For more information see `crates/cranelift/src/lib.rs`.
+    pub stack_limit: UnsafeCell<usize>,
 
     /// The value of the frame pointer register when we last called from Wasm to
     /// the host.

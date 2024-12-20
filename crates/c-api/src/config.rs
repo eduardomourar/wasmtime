@@ -3,7 +3,6 @@
 #![cfg_attr(not(feature = "cache"), allow(unused_imports))]
 
 use crate::{handle_result, wasm_memorytype_t, wasmtime_error_t};
-use std::ops::Range;
 use std::os::raw::c_char;
 use std::ptr;
 use std::{ffi::CStr, sync::Arc};
@@ -222,31 +221,26 @@ pub unsafe extern "C" fn wasmtime_config_cache_config_load(
 }
 
 #[no_mangle]
-pub extern "C" fn wasmtime_config_static_memory_forced_set(c: &mut wasm_config_t, enable: bool) {
-    c.config.static_memory_forced(enable);
+pub extern "C" fn wasmtime_config_memory_may_move_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.memory_may_move(enable);
 }
 
 #[no_mangle]
-pub extern "C" fn wasmtime_config_static_memory_maximum_size_set(c: &mut wasm_config_t, size: u64) {
-    c.config.static_memory_maximum_size(size);
+pub extern "C" fn wasmtime_config_memory_reservation_set(c: &mut wasm_config_t, size: u64) {
+    c.config.memory_reservation(size);
 }
 
 #[no_mangle]
-pub extern "C" fn wasmtime_config_static_memory_guard_size_set(c: &mut wasm_config_t, size: u64) {
-    c.config.static_memory_guard_size(size);
+pub extern "C" fn wasmtime_config_memory_guard_size_set(c: &mut wasm_config_t, size: u64) {
+    c.config.memory_guard_size(size);
 }
 
 #[no_mangle]
-pub extern "C" fn wasmtime_config_dynamic_memory_guard_size_set(c: &mut wasm_config_t, size: u64) {
-    c.config.dynamic_memory_guard_size(size);
-}
-
-#[no_mangle]
-pub extern "C" fn wasmtime_config_dynamic_memory_reserved_for_growth_set(
+pub extern "C" fn wasmtime_config_memory_reservation_for_growth_set(
     c: &mut wasm_config_t,
     size: u64,
 ) {
-    c.config.dynamic_memory_reserved_for_growth(size);
+    c.config.memory_reservation_for_growth(size);
 }
 
 #[no_mangle]
@@ -327,37 +321,23 @@ struct CHostLinearMemory {
 unsafe impl LinearMemory for CHostLinearMemory {
     fn byte_size(&self) -> usize {
         let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
+        let mut byte_capacity = 0;
         let cb = self.get_memory;
-        cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size);
+        cb(self.foreign.data, &mut byte_size, &mut byte_capacity);
         return byte_size;
     }
-    fn maximum_byte_size(&self) -> Option<usize> {
+    fn byte_capacity(&self) -> usize {
         let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
+        let mut byte_capacity = 0;
         let cb = self.get_memory;
-        cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size);
-        if maximum_byte_size == 0 {
-            None
-        } else {
-            Some(maximum_byte_size)
-        }
+        cb(self.foreign.data, &mut byte_size, &mut byte_capacity);
+        byte_capacity
     }
     fn as_ptr(&self) -> *mut u8 {
         let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
+        let mut byte_capacity = 0;
         let cb = self.get_memory;
-        cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size)
-    }
-    fn wasm_accessible(&self) -> Range<usize> {
-        let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
-        let cb = self.get_memory;
-        let ptr = cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size);
-        Range {
-            start: ptr as usize,
-            end: ptr as usize + byte_size,
-        }
+        cb(self.foreign.data, &mut byte_size, &mut byte_capacity)
     }
     fn grow_to(&mut self, new_size: usize) -> Result<()> {
         let cb = self.grow_memory;
