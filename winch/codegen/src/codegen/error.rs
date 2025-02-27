@@ -23,6 +23,15 @@ pub(crate) enum CodeGenError {
     /// Unimplemented due to requiring AVX.
     #[error("Instruction not implemented for CPUs without AVX support")]
     UnimplementedForNoAvx,
+    /// Unimplemented due to requiring AVX2.
+    #[error("Instruction not implemented for CPUs without AVX2 support")]
+    UnimplementedForNoAvx2,
+    /// Unimplemented due to requiring AVX512VL.
+    #[error("Instruction not implemented for CPUs without AVX512VL support")]
+    UnimplementedForNoAvx512VL,
+    /// Unimplemented due to requiring AVX512DQ.
+    #[error("Instruction not implemented for CPUs without AVX512DQ support")]
+    UnimplementedForNoAvx512DQ,
     /// Unsupported eager initialization of tables.
     #[error("Unsupported eager initialization of tables")]
     UnsupportedTableEagerInit,
@@ -32,8 +41,6 @@ pub(crate) enum CodeGenError {
     /// implies a compiler bug.
     #[error("Winch internal error: {0}")]
     Internal(InternalError),
-    #[error("Unsupported extend kind")]
-    UnsupportedExtendKind,
 }
 
 /// An internal error.
@@ -186,9 +193,5 @@ impl CodeGenError {
 
     pub(crate) const fn unimplemented_masm_instruction() -> Self {
         Self::UnimplementedMasmInstruction
-    }
-
-    pub(crate) const fn unsupported_extend_kind() -> Self {
-        Self::UnsupportedExtendKind
     }
 }

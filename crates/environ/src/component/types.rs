@@ -1,5 +1,5 @@
 use crate::component::{MAX_FLAT_PARAMS, MAX_FLAT_RESULTS};
-use crate::prelude::*;
+use crate::{prelude::*, TypeTrace};
 use crate::{EntityType, ModuleInternedTypeIndex, ModuleTypes, PrimaryMap};
 use core::hash::{Hash, Hasher};
 use core::ops::Index;
@@ -89,6 +89,36 @@ indices! {
     pub struct TypeResultIndex(u32);
     /// Index pointing to a list type in the component model.
     pub struct TypeListIndex(u32);
+    /// Index pointing to a future type in the component model.
+    pub struct TypeFutureIndex(u32);
+    /// Index pointing to a future table within a component.
+    ///
+    /// This is analogous to `TypeResourceTableIndex` in that it tracks
+    /// ownership of futures within each (sub)component instance.
+    pub struct TypeFutureTableIndex(u32);
+    /// Index pointing to a stream type in the component model.
+    pub struct TypeStreamIndex(u32);
+    /// Index pointing to a stream table within a component.
+    ///
+    /// This is analogous to `TypeResourceTableIndex` in that it tracks
+    /// ownership of stream within each (sub)component instance.
+    pub struct TypeStreamTableIndex(u32);
+
+    /// Index pointing to a error context table within a component.
+    ///
+    /// This is analogous to `TypeResourceTableIndex` in that it tracks
+    /// ownership of error contexts within each (sub)component instance.
+    pub struct TypeComponentLocalErrorContextTableIndex(u32);
+
+    /// Index pointing to a (component) globally tracked error context table entry
+    ///
+    /// Unlike [`TypeComponentLocalErrorContextTableIndex`], this index refers to
+    /// the global state table for error contexts at the level of the entire component,
+    /// not just a subcomponent.
+    pub struct TypeComponentGlobalErrorContextTableIndex(u32);
+
+    /// Index pointing to an interned `task.return` type within a component.
+    pub struct TypeTaskReturnIndex(u32);
 
     /// Index pointing to a resource table within a component.
     ///
@@ -186,6 +216,9 @@ indices! {
     /// Same as `RuntimeMemoryIndex` except for the `realloc` function.
     pub struct RuntimeReallocIndex(u32);
 
+    /// Same as `RuntimeMemoryIndex` except for the `callback` function.
+    pub struct RuntimeCallbackIndex(u32);
+
     /// Same as `RuntimeMemoryIndex` except for the `post-return` function.
     pub struct RuntimePostReturnIndex(u32);
 
@@ -194,7 +227,7 @@ indices! {
     ///
     /// This is used to point to various bits of metadata within a compiled
     /// component and is stored in the final compilation artifact. This does not
-    /// have a direct corresponance to any wasm definition.
+    /// have a direct correspondence to any wasm definition.
     pub struct TrampolineIndex(u32);
 
     /// An index into `Component::export_items` at the end of compilation.
@@ -237,14 +270,53 @@ pub struct ComponentTypes {
     pub(super) options: PrimaryMap<TypeOptionIndex, TypeOption>,
     pub(super) results: PrimaryMap<TypeResultIndex, TypeResult>,
     pub(super) resource_tables: PrimaryMap<TypeResourceTableIndex, TypeResourceTable>,
-
     pub(super) module_types: Option<ModuleTypes>,
+    pub(super) futures: PrimaryMap<TypeFutureIndex, TypeFuture>,
+    pub(super) future_tables: PrimaryMap<TypeFutureTableIndex, TypeFutureTable>,
+    pub(super) streams: PrimaryMap<TypeStreamIndex, TypeStream>,
+    pub(super) stream_tables: PrimaryMap<TypeStreamTableIndex, TypeStreamTable>,
+    pub(super) error_context_tables:
+        PrimaryMap<TypeComponentLocalErrorContextTableIndex, TypeErrorContextTable>,
+    pub(super) task_returns: PrimaryMap<TypeTaskReturnIndex, TypeTaskReturn>,
+}
+
+impl TypeTrace for ComponentTypes {
+    fn trace<F, E>(&self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(crate::EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        for (_, m) in &self.modules {
+            m.trace(func)?;
+        }
+        if let Some(m) = self.module_types.as_ref() {
+            m.trace(func)?;
+        }
+        Ok(())
+    }
+
+    fn trace_mut<F, E>(&mut self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(&mut crate::EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        for (_, m) in &mut self.modules {
+            m.trace_mut(func)?;
+        }
+        if let Some(m) = self.module_types.as_mut() {
+            m.trace_mut(func)?;
+        }
+        Ok(())
+    }
 }
 
 impl ComponentTypes {
     /// Returns the core wasm module types known within this component.
     pub fn module_types(&self) -> &ModuleTypes {
         self.module_types.as_ref().unwrap()
+    }
+
+    /// Returns the core wasm module types known within this component.
+    pub fn module_types_mut(&mut self) -> &mut ModuleTypes {
+        self.module_types.as_mut().unwrap()
     }
 
     /// Returns the canonical ABI information about the specified type.
@@ -261,7 +333,10 @@ impl ComponentTypes {
             | InterfaceType::Float32
             | InterfaceType::Char
             | InterfaceType::Own(_)
-            | InterfaceType::Borrow(_) => &CanonicalAbiInfo::SCALAR4,
+            | InterfaceType::Borrow(_)
+            | InterfaceType::Future(_)
+            | InterfaceType::Stream(_)
+            | InterfaceType::ErrorContext(_) => &CanonicalAbiInfo::SCALAR4,
 
             InterfaceType::U64 | InterfaceType::S64 | InterfaceType::Float64 => {
                 &CanonicalAbiInfo::SCALAR8
@@ -320,6 +395,11 @@ impl_index! {
     impl Index<TypeResultIndex> for ComponentTypes { TypeResult => results }
     impl Index<TypeListIndex> for ComponentTypes { TypeList => lists }
     impl Index<TypeResourceTableIndex> for ComponentTypes { TypeResourceTable => resource_tables }
+    impl Index<TypeFutureIndex> for ComponentTypes { TypeFuture => futures }
+    impl Index<TypeStreamIndex> for ComponentTypes { TypeStream => streams }
+    impl Index<TypeFutureTableIndex> for ComponentTypes { TypeFutureTable => future_tables }
+    impl Index<TypeStreamTableIndex> for ComponentTypes { TypeStreamTable => stream_tables }
+    impl Index<TypeComponentLocalErrorContextTableIndex> for ComponentTypes { TypeErrorContextTable => error_context_tables }
 }
 
 // Additionally forward anything that can index `ModuleTypes` to `ModuleTypes`
@@ -402,6 +482,34 @@ pub struct TypeModule {
     pub exports: IndexMap<String, EntityType>,
 }
 
+impl TypeTrace for TypeModule {
+    fn trace<F, E>(&self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(crate::EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        for ty in self.imports.values() {
+            ty.trace(func)?;
+        }
+        for ty in self.exports.values() {
+            ty.trace(func)?;
+        }
+        Ok(())
+    }
+
+    fn trace_mut<F, E>(&mut self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(&mut crate::EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        for ty in self.imports.values_mut() {
+            ty.trace_mut(func)?;
+        }
+        for ty in self.exports.values_mut() {
+            ty.trace_mut(func)?;
+        }
+        Ok(())
+    }
+}
+
 /// The type of a component in the component model.
 #[derive(Serialize, Deserialize, Default)]
 pub struct TypeComponent {
@@ -430,6 +538,20 @@ pub struct TypeFunc {
     pub params: TypeTupleIndex,
     /// Results of the function represented as a tuple.
     pub results: TypeTupleIndex,
+    /// Expected core func type for memory32 `task.return` calls for this function.
+    pub task_return_type32: TypeTaskReturnIndex,
+    /// Expected core func type for memory64 `task.return` calls for this function.
+    pub task_return_type64: TypeTaskReturnIndex,
+}
+
+/// A core type representing the expected `task.return` signature for a
+/// component function.
+#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct TypeTaskReturn {
+    /// Core type parameters for the signature.
+    ///
+    /// Note that `task.return` never returns results.
+    pub params: Vec<FlatType>,
 }
 
 /// All possible interface types that values can have.
@@ -464,6 +586,9 @@ pub enum InterfaceType {
     Result(TypeResultIndex),
     Own(TypeResourceTableIndex),
     Borrow(TypeResourceTableIndex),
+    Future(TypeFutureTableIndex),
+    Stream(TypeStreamTableIndex),
+    ErrorContext(TypeComponentLocalErrorContextTableIndex),
 }
 
 impl From<&wasmparser::PrimitiveValType> for InterfaceType {
@@ -972,6 +1097,45 @@ pub struct TypeResult {
     pub info: VariantInfo,
 }
 
+/// Shape of a "future" interface type.
+#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct TypeFuture {
+    /// The `T` in `future<T>`
+    pub payload: Option<InterfaceType>,
+}
+
+/// Metadata about a future table added to a component.
+#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct TypeFutureTable {
+    /// The specific future type this table is used for.
+    pub ty: TypeFutureIndex,
+    /// The specific component instance this table is used for.
+    pub instance: RuntimeComponentInstanceIndex,
+}
+
+/// Shape of a "stream" interface type.
+#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct TypeStream {
+    /// The `T` in `stream<T>`
+    pub payload: Option<InterfaceType>,
+}
+
+/// Metadata about a stream table added to a component.
+#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct TypeStreamTable {
+    /// The specific stream type this table is used for.
+    pub ty: TypeStreamIndex,
+    /// The specific component instance this table is used for.
+    pub instance: RuntimeComponentInstanceIndex,
+}
+
+/// Metadata about a error context table added to a component.
+#[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq, Debug)]
+pub struct TypeErrorContextTable {
+    /// The specific component instance this table is used for.
+    pub instance: RuntimeComponentInstanceIndex,
+}
+
 /// Metadata about a resource table added to a component.
 #[derive(Serialize, Deserialize, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct TypeResourceTable {
@@ -1049,7 +1213,7 @@ impl FlatTypes<'_> {
 // Note that this is intentionally duplicated here to keep the size to 1 byte
 // regardless to changes in the core wasm type system since this will only
 // ever use integers/floats for the foreseeable future.
-#[derive(PartialEq, Eq, Copy, Clone)]
+#[derive(Serialize, Deserialize, Hash, Debug, PartialEq, Eq, Copy, Clone)]
 #[allow(missing_docs, reason = "self-describing variants")]
 pub enum FlatType {
     I32,

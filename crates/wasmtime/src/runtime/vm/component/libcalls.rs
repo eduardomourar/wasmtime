@@ -2,9 +2,10 @@
 
 use crate::prelude::*;
 use crate::runtime::vm::component::{ComponentInstance, VMComponentContext};
-use crate::runtime::vm::HostResultHasUnwindSentinel;
+use crate::runtime::vm::{HostResultHasUnwindSentinel, VmSafe};
 use core::cell::Cell;
 use core::convert::Infallible;
+use core::ptr::NonNull;
 use core::slice;
 use wasmtime_environ::component::TypeResourceTableIndex;
 
@@ -19,7 +20,7 @@ macro_rules! signature {
     (@ty u32) => (u32);
     (@ty u64) => (u64);
     (@ty bool) => (bool);
-    (@ty vmctx) => (*mut VMComponentContext);
+    (@ty vmctx) => (NonNull<VMComponentContext>);
 }
 
 /// Defines a `VMComponentBuiltins` structure which contains any builtins such
@@ -42,6 +43,10 @@ macro_rules! define_builtins {
             )*
         }
 
+        // SAFETY: the above structure is repr(C) and only contains `VmSafe`
+        // fields.
+        unsafe impl VmSafe for VMComponentBuiltins {}
+
         impl VMComponentBuiltins {
             pub const INIT: VMComponentBuiltins = VMComponentBuiltins {
                 $($name: trampolines::$name,)*
@@ -59,6 +64,7 @@ wasmtime_environ::foreach_builtin_component_function!(define_builtins);
 #[allow(improper_ctypes_definitions)]
 mod trampolines {
     use super::VMComponentContext;
+    use core::ptr::NonNull;
 
     macro_rules! shims {
         (
@@ -486,18 +492,26 @@ fn inflate_latin1_bytes(dst: &mut [u16], latin1_bytes_so_far: usize) -> &mut [u1
     return rest;
 }
 
-unsafe fn resource_new32(vmctx: *mut VMComponentContext, resource: u32, rep: u32) -> Result<u32> {
+unsafe fn resource_new32(
+    vmctx: NonNull<VMComponentContext>,
+    resource: u32,
+    rep: u32,
+) -> Result<u32> {
     let resource = TypeResourceTableIndex::from_u32(resource);
     ComponentInstance::from_vmctx(vmctx, |instance| instance.resource_new32(resource, rep))
 }
 
-unsafe fn resource_rep32(vmctx: *mut VMComponentContext, resource: u32, idx: u32) -> Result<u32> {
+unsafe fn resource_rep32(
+    vmctx: NonNull<VMComponentContext>,
+    resource: u32,
+    idx: u32,
+) -> Result<u32> {
     let resource = TypeResourceTableIndex::from_u32(resource);
     ComponentInstance::from_vmctx(vmctx, |instance| instance.resource_rep32(resource, idx))
 }
 
 unsafe fn resource_drop(
-    vmctx: *mut VMComponentContext,
+    vmctx: NonNull<VMComponentContext>,
     resource: u32,
     idx: u32,
 ) -> Result<ResourceDropRet> {
@@ -521,7 +535,7 @@ unsafe impl HostResultHasUnwindSentinel for ResourceDropRet {
 }
 
 unsafe fn resource_transfer_own(
-    vmctx: *mut VMComponentContext,
+    vmctx: NonNull<VMComponentContext>,
     src_idx: u32,
     src_table: u32,
     dst_table: u32,
@@ -534,7 +548,7 @@ unsafe fn resource_transfer_own(
 }
 
 unsafe fn resource_transfer_borrow(
-    vmctx: *mut VMComponentContext,
+    vmctx: NonNull<VMComponentContext>,
     src_idx: u32,
     src_table: u32,
     dst_table: u32,
@@ -546,14 +560,44 @@ unsafe fn resource_transfer_borrow(
     })
 }
 
-unsafe fn resource_enter_call(vmctx: *mut VMComponentContext) {
+unsafe fn resource_enter_call(vmctx: NonNull<VMComponentContext>) {
     ComponentInstance::from_vmctx(vmctx, |instance| instance.resource_enter_call())
 }
 
-unsafe fn resource_exit_call(vmctx: *mut VMComponentContext) -> Result<()> {
+unsafe fn resource_exit_call(vmctx: NonNull<VMComponentContext>) -> Result<()> {
     ComponentInstance::from_vmctx(vmctx, |instance| instance.resource_exit_call())
 }
 
-unsafe fn trap(_vmctx: *mut VMComponentContext, code: u8) -> Result<Infallible> {
+unsafe fn trap(_vmctx: NonNull<VMComponentContext>, code: u8) -> Result<Infallible> {
     Err(wasmtime_environ::Trap::from_u8(code).unwrap().into())
+}
+
+unsafe fn future_transfer(
+    vmctx: NonNull<VMComponentContext>,
+    src_idx: u32,
+    src_table: u32,
+    dst_table: u32,
+) -> Result<u32> {
+    _ = (vmctx, src_idx, src_table, dst_table);
+    todo!()
+}
+
+unsafe fn stream_transfer(
+    vmctx: NonNull<VMComponentContext>,
+    src_idx: u32,
+    src_table: u32,
+    dst_table: u32,
+) -> Result<u32> {
+    _ = (vmctx, src_idx, src_table, dst_table);
+    todo!()
+}
+
+unsafe fn error_context_transfer(
+    vmctx: NonNull<VMComponentContext>,
+    src_idx: u32,
+    src_table: u32,
+    dst_table: u32,
+) -> Result<u32> {
+    _ = (vmctx, src_idx, src_table, dst_table);
+    todo!()
 }

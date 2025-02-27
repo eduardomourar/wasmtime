@@ -667,9 +667,9 @@ unsafe impl GcHeap for DrcHeap {
         })
     }
 
-    unsafe fn vmctx_gc_heap_data(&self) -> *mut u8 {
-        let ptr = &*self.activations_table as *const VMGcRefActivationsTable;
-        ptr.cast_mut().cast::<u8>()
+    unsafe fn vmctx_gc_heap_data(&self) -> NonNull<u8> {
+        let ptr: NonNull<VMGcRefActivationsTable> = NonNull::from(&*self.activations_table);
+        ptr.cast()
     }
 
     #[cfg(feature = "pooling-allocator")]
@@ -1025,10 +1025,12 @@ mod tests {
             num_imported_tables: 0,
             num_imported_memories: 0,
             num_imported_globals: 0,
+            num_imported_tags: 0,
             num_defined_tables: 0,
             num_defined_memories: 0,
             num_owned_memories: 0,
             num_defined_globals: 0,
+            num_defined_tags: 0,
             num_escaped_funcs: 0,
         });
 
@@ -1053,10 +1055,12 @@ mod tests {
             num_imported_tables: 0,
             num_imported_memories: 0,
             num_imported_globals: 0,
+            num_imported_tags: 0,
             num_defined_tables: 0,
             num_defined_memories: 0,
             num_owned_memories: 0,
             num_defined_globals: 0,
+            num_defined_tags: 0,
             num_escaped_funcs: 0,
         });
         assert_eq!(
@@ -1080,10 +1084,12 @@ mod tests {
             num_imported_tables: 0,
             num_imported_memories: 0,
             num_imported_globals: 0,
+            num_imported_tags: 0,
             num_defined_tables: 0,
             num_defined_memories: 0,
             num_owned_memories: 0,
             num_defined_globals: 0,
+            num_defined_tags: 0,
             num_escaped_funcs: 0,
         });
         assert_eq!(

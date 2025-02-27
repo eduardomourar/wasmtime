@@ -94,6 +94,103 @@ impl<'a> TrampolineCompiler<'a> {
             Trampoline::AlwaysTrap => {
                 self.translate_always_trap();
             }
+            Trampoline::TaskBackpressure { instance } => {
+                _ = instance;
+                todo!()
+            }
+            Trampoline::TaskReturn => todo!(),
+            Trampoline::TaskWait {
+                instance,
+                async_,
+                memory,
+            } => {
+                _ = (instance, async_, memory);
+                todo!()
+            }
+            Trampoline::TaskPoll {
+                instance,
+                async_,
+                memory,
+            } => {
+                _ = (instance, async_, memory);
+                todo!()
+            }
+            Trampoline::TaskYield { async_ } => {
+                _ = async_;
+                todo!()
+            }
+            Trampoline::SubtaskDrop { instance } => {
+                _ = instance;
+                todo!()
+            }
+            Trampoline::StreamNew { ty } => {
+                _ = ty;
+                todo!()
+            }
+            Trampoline::StreamRead { ty, options } => {
+                _ = (ty, options);
+                todo!()
+            }
+            Trampoline::StreamWrite { ty, options } => {
+                _ = (ty, options);
+                todo!()
+            }
+            Trampoline::StreamCancelRead { ty, async_ } => {
+                _ = (ty, async_);
+                todo!()
+            }
+            Trampoline::StreamCancelWrite { ty, async_ } => {
+                _ = (ty, async_);
+                todo!()
+            }
+            Trampoline::StreamCloseReadable { ty } => {
+                _ = ty;
+                todo!()
+            }
+            Trampoline::StreamCloseWritable { ty } => {
+                _ = ty;
+                todo!()
+            }
+            Trampoline::FutureNew { ty } => {
+                _ = ty;
+                todo!()
+            }
+            Trampoline::FutureRead { ty, options } => {
+                _ = (ty, options);
+                todo!()
+            }
+            Trampoline::FutureWrite { ty, options } => {
+                _ = (ty, options);
+                todo!()
+            }
+            Trampoline::FutureCancelRead { ty, async_ } => {
+                _ = (ty, async_);
+                todo!()
+            }
+            Trampoline::FutureCancelWrite { ty, async_ } => {
+                _ = (ty, async_);
+                todo!()
+            }
+            Trampoline::FutureCloseReadable { ty } => {
+                _ = ty;
+                todo!()
+            }
+            Trampoline::FutureCloseWritable { ty } => {
+                _ = ty;
+                todo!()
+            }
+            Trampoline::ErrorContextNew { ty, options } => {
+                _ = (ty, options);
+                todo!()
+            }
+            Trampoline::ErrorContextDebugMessage { ty, options } => {
+                _ = (ty, options);
+                todo!()
+            }
+            Trampoline::ErrorContextDrop { ty } => {
+                _ = ty;
+                todo!()
+            }
             Trampoline::ResourceNew(ty) => self.translate_resource_new(*ty),
             Trampoline::ResourceRep(ty) => self.translate_resource_rep(*ty),
             Trampoline::ResourceDrop(ty) => self.translate_resource_drop(*ty),
@@ -114,6 +211,26 @@ impl<'a> TrampolineCompiler<'a> {
                 self.translate_resource_libcall(host::resource_exit_call, |me, rets| {
                     me.raise_if_host_trapped(rets.pop().unwrap());
                 })
+            }
+            Trampoline::AsyncEnterCall => todo!(),
+            Trampoline::AsyncExitCall {
+                callback,
+                post_return,
+            } => {
+                _ = (callback, post_return);
+                todo!()
+            }
+            Trampoline::FutureTransfer => {
+                _ = host::future_transfer;
+                todo!()
+            }
+            Trampoline::StreamTransfer => {
+                _ = host::stream_transfer;
+                todo!()
+            }
+            Trampoline::ErrorContextTransfer => {
+                _ = host::error_context_transfer;
+                todo!()
             }
         }
     }
@@ -159,6 +276,8 @@ impl<'a> TrampolineCompiler<'a> {
             realloc,
             post_return,
             string_encoding,
+            callback: _,
+            async_,
         } = *options;
 
         // vmctx: *mut VMComponentContext
@@ -225,6 +344,14 @@ impl<'a> TrampolineCompiler<'a> {
             self.builder
                 .ins()
                 .iconst(ir::types::I8, i64::from(string_encoding as u8)),
+        );
+
+        // async_: bool
+        host_sig.params.push(ir::AbiParam::new(ir::types::I8));
+        callee_args.push(
+            self.builder
+                .ins()
+                .iconst(ir::types::I8, if async_ { 1 } else { 0 }),
         );
 
         // storage: *mut ValRaw

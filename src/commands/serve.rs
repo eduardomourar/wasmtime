@@ -11,7 +11,7 @@ use std::{
 };
 use wasmtime::component::Linker;
 use wasmtime::{Engine, Store, StoreLimits};
-use wasmtime_wasi::{StreamError, StreamResult, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{IoView, StreamError, StreamResult, WasiCtx, WasiCtxBuilder, WasiView};
 use wasmtime_wasi_http::bindings::http::types::Scheme;
 use wasmtime_wasi_http::bindings::ProxyPre;
 use wasmtime_wasi_http::io::TokioIo;
@@ -46,21 +46,18 @@ struct Host {
     wasi_keyvalue: Option<WasiKeyValueCtx>,
 }
 
-impl WasiView for Host {
+impl IoView for Host {
     fn table(&mut self) -> &mut wasmtime::component::ResourceTable {
         &mut self.table
     }
-
+}
+impl WasiView for Host {
     fn ctx(&mut self) -> &mut WasiCtx {
         &mut self.ctx
     }
 }
 
 impl WasiHttpView for Host {
-    fn table(&mut self) -> &mut wasmtime::component::ResourceTable {
-        &mut self.table
-    }
-
     fn ctx(&mut self) -> &mut WasiHttpCtx {
         &mut self.http
     }
@@ -518,7 +515,7 @@ async fn handle_request(
             .call_handle(store, req, out)
             .await
         {
-            log::error!("[{req_id}] :: {:#?}", e);
+            log::error!("[{req_id}] :: {:?}", e);
             return Err(e);
         }
 
@@ -540,7 +537,7 @@ async fn handle_request(
                 Ok(r) => r.expect_err("if the receiver has an error, the task must have failed"),
                 Err(e) => e.into(),
             };
-            bail!("guest never invoked `response-outparam::set` method: {e:?}")
+            return Err(e.context("guest never invoked `response-outparam::set` method"));
         }
     }
 }
@@ -581,7 +578,7 @@ impl LogStream {
 }
 
 impl wasmtime_wasi::StdoutStream for LogStream {
-    fn stream(&self) -> Box<dyn wasmtime_wasi::HostOutputStream> {
+    fn stream(&self) -> Box<dyn wasmtime_wasi::OutputStream> {
         Box::new(self.clone())
     }
 
@@ -595,7 +592,7 @@ impl wasmtime_wasi::StdoutStream for LogStream {
     }
 }
 
-impl wasmtime_wasi::HostOutputStream for LogStream {
+impl wasmtime_wasi::OutputStream for LogStream {
     fn write(&mut self, bytes: bytes::Bytes) -> StreamResult<()> {
         let mut bytes = &bytes[..];
 
@@ -637,7 +634,7 @@ impl wasmtime_wasi::HostOutputStream for LogStream {
 }
 
 #[async_trait::async_trait]
-impl wasmtime_wasi::Subscribe for LogStream {
+impl wasmtime_wasi::Pollable for LogStream {
     async fn ready(&mut self) {}
 }
 

@@ -1,14 +1,13 @@
 use crate::prelude::*;
 #[cfg(feature = "std")]
 use crate::runtime::vm::open_file_for_mmap;
-use crate::runtime::vm::{CompiledModuleId, MmapVec, ModuleMemoryImages, VMWasmCallFunction};
+use crate::runtime::vm::{CompiledModuleId, ModuleMemoryImages, VMWasmCallFunction};
 use crate::sync::OnceLock;
 use crate::{
     code::CodeObject,
     code_memory::CodeMemory,
     instantiate::CompiledModule,
     resources::ResourcesRequired,
-    type_registry::TypeCollection,
     types::{ExportType, ExternType, ImportType},
     Engine,
 };
@@ -153,6 +152,7 @@ struct ModuleInner {
     memory_images: OnceLock<Option<ModuleMemoryImages>>,
 
     /// Flag indicating whether this module can be serialized or not.
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
     serializable: bool,
 
     /// Runtime offset information for `VMContext`.
@@ -344,7 +344,7 @@ impl Module {
     #[cfg(all(feature = "std", any(feature = "cranelift", feature = "winch")))]
     pub unsafe fn from_trusted_file(engine: &Engine, file: impl AsRef<Path>) -> Result<Module> {
         let open_file = open_file_for_mmap(file.as_ref())?;
-        let mmap = MmapVec::from_file(open_file)?;
+        let mmap = crate::runtime::vm::MmapVec::from_file(open_file)?;
         if &mmap[0..4] == b"\x7fELF" {
             let code = engine.load_code(mmap, ObjectKind::Module)?;
             return Module::from_parts(engine, code, None);
@@ -474,7 +474,7 @@ impl Module {
         // Acquire this module's metadata and type information, deserializing
         // it from the provided artifact if it wasn't otherwise provided
         // already.
-        let (info, types) = match info_and_types {
+        let (mut info, mut types) = match info_and_types {
             Some((info, types)) => (info, types),
             None => postcard::from_bytes(code_memory.wasmtime_info())?,
         };
@@ -487,7 +487,8 @@ impl Module {
         // Note that the unsafety here should be ok since the `trampolines`
         // field should only point to valid trampoline function pointers
         // within the text section.
-        let signatures = TypeCollection::new_for_module(engine, &types);
+        let signatures =
+            engine.register_and_canonicalize_types(&mut types, core::iter::once(&mut info.module));
 
         // Package up all our data into a `CodeObject` and delegate to the final
         // step of module compilation.
@@ -510,12 +511,15 @@ impl Module {
             .allocator()
             .validate_module(module.module(), &offsets)?;
 
+        let _ = serializable;
+
         Ok(Self {
             inner: Arc::new(ModuleInner {
                 engine: engine.clone(),
                 code,
                 memory_images: OnceLock::new(),
                 module,
+                #[cfg(any(feature = "cranelift", feature = "winch"))]
                 serializable,
                 offsets,
             }),
@@ -617,7 +621,8 @@ impl Module {
         self.inner.code.module_types()
     }
 
-    pub(crate) fn signatures(&self) -> &TypeCollection {
+    #[cfg(any(feature = "component-model", feature = "gc-drc"))]
+    pub(crate) fn signatures(&self) -> &crate::type_registry::TypeCollection {
         self.inner.code.signatures()
     }
 
@@ -704,10 +709,8 @@ impl Module {
         let engine = self.engine();
         module
             .imports()
-            .map(move |(imp_mod, imp_field, mut ty)| {
-                ty.canonicalize_for_runtime_usage(&mut |i| {
-                    self.signatures().shared_type(i).unwrap()
-                });
+            .map(move |(imp_mod, imp_field, ty)| {
+                debug_assert!(ty.is_canonicalized_for_runtime_usage());
                 ImportType::new(imp_mod, imp_field, ty, types, engine)
             })
             .collect::<Vec<_>>()
@@ -1095,6 +1098,7 @@ impl Module {
     }
 
     /// Lookup the stack map at a program counter value.
+    #[cfg(feature = "gc")]
     pub(crate) fn lookup_stack_map(&self, pc: usize) -> Option<&wasmtime_environ::StackMap> {
         let text_offset = pc - self.inner.module.text().as_ptr() as usize;
         let (index, func_offset) = self.inner.module.func_by_text_offset(text_offset)?;

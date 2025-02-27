@@ -20,6 +20,7 @@ mod emit;
 mod emit_state;
 #[cfg(test)]
 mod emit_tests;
+pub mod external;
 pub mod regs;
 mod stack_switch;
 pub mod unwind;
@@ -30,6 +31,7 @@ use args::*;
 // Instructions (top level): definition
 
 // `Inst` is defined inside ISLE as `MInst`. We publicly re-export it here.
+pub use super::lower::isle::generated_code::AtomicRmwSeqOp;
 pub use super::lower::isle::generated_code::MInst as Inst;
 
 /// Out-of-line data for return-calls, to keep the size of `Inst` down.
@@ -54,7 +56,7 @@ pub struct ReturnCallInfo<T> {
 fn inst_size_test() {
     // This test will help with unintentionally growing the size
     // of the Inst enum.
-    assert_eq!(40, std::mem::size_of::<Inst>());
+    assert_eq!(48, std::mem::size_of::<Inst>());
 }
 
 pub(crate) fn low32_will_sign_extend_to_64(x: u64) -> bool {
@@ -92,7 +94,8 @@ impl Inst {
             | Inst::Hlt
             | Inst::Imm { .. }
             | Inst::JmpCond { .. }
-            | Inst::JmpIf { .. }
+            | Inst::JmpCondOr { .. }
+            | Inst::WinchJmpIf { .. }
             | Inst::JmpKnown { .. }
             | Inst::JmpTableSeq { .. }
             | Inst::JmpUnknown { .. }
@@ -187,6 +190,17 @@ impl Inst {
             | Inst::XmmCmpRmRVex { op, .. } => op.available_from(),
 
             Inst::MulX { .. } => smallvec![InstructionSet::BMI2],
+
+            Inst::External { inst } => {
+                use cranelift_assembler_x64::Feature::*;
+                let features = smallvec![];
+                for f in inst.features() {
+                    match f {
+                        _64b | compat => {}
+                    }
+                }
+                features
+            }
         }
     }
 }
@@ -1737,10 +1751,22 @@ impl PrettyPrint for Inst {
                 format!("{op} {dst}")
             }
 
-            Inst::JmpIf { cc, taken } => {
+            Inst::WinchJmpIf { cc, taken } => {
                 let taken = taken.to_string();
                 let op = ljustify2("j".to_string(), cc.to_string());
                 format!("{op} {taken}")
+            }
+
+            Inst::JmpCondOr {
+                cc1,
+                cc2,
+                taken,
+                not_taken,
+            } => {
+                let taken = taken.to_string();
+                let not_taken = not_taken.to_string();
+                let op = ljustify(format!("j{cc1},{cc2}"));
+                format!("{op} {taken}; j {not_taken}")
             }
 
             Inst::JmpCond {
@@ -1951,6 +1977,10 @@ impl PrettyPrint for Inst {
             Inst::DummyUse { reg } => {
                 let reg = pretty_print_reg(*reg, 8);
                 format!("dummy_use {reg}")
+            }
+
+            Inst::External { inst } => {
+                format!("{inst}")
             }
         }
     }
@@ -2656,8 +2686,9 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         }
 
         Inst::JmpKnown { .. }
-        | Inst::JmpIf { .. }
+        | Inst::WinchJmpIf { .. }
         | Inst::JmpCond { .. }
+        | Inst::JmpCondOr { .. }
         | Inst::Ret { .. }
         | Inst::Nop { .. }
         | Inst::TrapIf { .. }
@@ -2697,6 +2728,10 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
 
         Inst::DummyUse { reg } => {
             collector.reg_use(reg);
+        }
+
+        Inst::External { inst } => {
+            inst.visit(&mut external::RegallocVisitor { collector });
         }
     }
 }
@@ -2774,9 +2809,17 @@ impl MachInst for Inst {
             }
             &Self::JmpKnown { .. } => MachTerminator::Uncond,
             &Self::JmpCond { .. } => MachTerminator::Cond,
+            &Self::JmpCondOr { .. } => MachTerminator::Cond,
             &Self::JmpTableSeq { .. } => MachTerminator::Indirect,
             // All other cases are boring.
             _ => MachTerminator::None,
+        }
+    }
+
+    fn is_low_level_branch(&self) -> bool {
+        match self {
+            &Self::WinchJmpIf { .. } => true,
+            _ => false,
         }
     }
 

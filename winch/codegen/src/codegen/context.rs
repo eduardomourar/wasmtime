@@ -1,4 +1,5 @@
 use anyhow::{bail, ensure, Result};
+use wasmparser::{Ieee32, Ieee64};
 use wasmtime_environ::{VMOffsets, WasmHeapType, WasmValType};
 
 use super::ControlStackFrame;
@@ -7,8 +8,11 @@ use crate::{
     codegen::{CodeGenError, CodeGenPhase, Emission, Prologue},
     frame::Frame,
     isa::reg::RegClass,
-    masm::{MacroAssembler, OperandSize, RegImm, SPOffset, ShiftKind, StackSlot},
-    reg::{writable, Reg},
+    masm::{
+        ExtractLaneKind, MacroAssembler, OperandSize, RegImm, ReplaceLaneKind, SPOffset, ShiftKind,
+        StackSlot,
+    },
+    reg::{writable, Reg, WritableReg},
     regalloc::RegAlloc,
     stack::{Stack, TypedReg, Val},
 };
@@ -329,13 +333,13 @@ impl<'a> CodeGenContext<'a, Emission> {
     /// Prepares arguments for emitting a unary operation.
     ///
     /// The `emit` function returns the `TypedReg` to put on the value stack.
-    pub fn unop<F, M>(&mut self, masm: &mut M, size: OperandSize, emit: &mut F) -> Result<()>
+    pub fn unop<F, M>(&mut self, masm: &mut M, emit: F) -> Result<()>
     where
-        F: FnMut(&mut M, Reg, OperandSize) -> Result<TypedReg>,
+        F: FnOnce(&mut M, Reg) -> Result<TypedReg>,
         M: MacroAssembler,
     {
         let typed_reg = self.pop_to_reg(masm, None)?;
-        let dst = emit(masm, typed_reg.reg, size)?;
+        let dst = emit(masm, typed_reg.reg)?;
         self.stack.push(dst.into());
 
         Ok(())
@@ -393,22 +397,16 @@ impl<'a> CodeGenContext<'a, Emission> {
         F: FnMut(&mut M, Reg, RegImm, OperandSize) -> Result<TypedReg>,
         M: MacroAssembler,
     {
-        let top = self.stack.peek().expect("value at stack top");
-
-        if top.is_i32_const() {
-            let val = self
-                .stack
-                .pop_i32_const()
-                .expect("i32 const value at stack top");
-            let typed_reg = self.pop_to_reg(masm, None)?;
-            let dst = emit(masm, typed_reg.reg, RegImm::i32(val), OperandSize::S32)?;
-            self.stack.push(dst.into());
-        } else {
-            self.binop(masm, OperandSize::S32, |masm, dst, src, size| {
+        match self.pop_i32_const() {
+            Some(val) => {
+                let typed_reg = self.pop_to_reg(masm, None)?;
+                let dst = emit(masm, typed_reg.reg, RegImm::i32(val), OperandSize::S32)?;
+                self.stack.push(dst.into());
+            }
+            None => self.binop(masm, OperandSize::S32, |masm, dst, src, size| {
                 emit(masm, dst, src.into(), size)
-            })?;
+            })?,
         }
-
         Ok(())
     }
 
@@ -420,22 +418,77 @@ impl<'a> CodeGenContext<'a, Emission> {
         F: FnOnce(&mut M, Reg, RegImm, OperandSize) -> Result<TypedReg>,
         M: MacroAssembler,
     {
+        match self.pop_i64_const() {
+            Some(val) => {
+                let typed_reg = self.pop_to_reg(masm, None)?;
+                let dst = emit(masm, typed_reg.reg, RegImm::i64(val), OperandSize::S64)?;
+                self.stack.push(dst.into());
+            }
+            None => self.binop(masm, OperandSize::S64, |masm, dst, src, size| {
+                emit(masm, dst, src.into(), size)
+            })?,
+        }
+        Ok(())
+    }
+
+    /// Returns the i32 const on top of the stack or None if there isn't one.
+    pub fn pop_i32_const(&mut self) -> Option<i32> {
         let top = self.stack.peek().expect("value at stack top");
+
+        if top.is_i32_const() {
+            let val = self
+                .stack
+                .pop_i32_const()
+                .expect("i32 const value at stack top");
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the i64 const on top of the stack or None if there isn't one.
+    pub fn pop_i64_const(&mut self) -> Option<i64> {
+        let top = self.stack.peek().expect("value at stack top");
+
         if top.is_i64_const() {
             let val = self
                 .stack
                 .pop_i64_const()
                 .expect("i64 const value at stack top");
-            let typed_reg = self.pop_to_reg(masm, None)?;
-            let dst = emit(masm, typed_reg.reg, RegImm::i64(val), OperandSize::S64)?;
-            self.stack.push(dst.into());
+            Some(val)
         } else {
-            self.binop(masm, OperandSize::S64, |masm, dst, src, size| {
-                emit(masm, dst, src.into(), size)
-            })?;
-        };
+            None
+        }
+    }
 
-        Ok(())
+    /// Returns the f32 const on top of the stack or None if there isn't one.
+    pub fn pop_f32_const(&mut self) -> Option<Ieee32> {
+        let top = self.stack.peek().expect("value at stack top");
+
+        if top.is_f32_const() {
+            let val = self
+                .stack
+                .pop_f32_const()
+                .expect("f32 const value at stack top");
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the f64 const on top of the stack or None if there isn't one.
+    pub fn pop_f64_const(&mut self) -> Option<Ieee64> {
+        let top = self.stack.peek().expect("value at stack top");
+
+        if top.is_f64_const() {
+            let val = self
+                .stack
+                .pop_f64_const()
+                .expect("f64 const value at stack top");
+            Some(val)
+        } else {
+            None
+        }
     }
 
     /// Prepares arguments for emitting a convert operation.
@@ -480,6 +533,92 @@ impl<'a> CodeGenContext<'a, Emission> {
             emit(masm, dst, src, tmp_gpr, dst_size)
         })?;
         self.free_reg(tmp_gpr);
+        Ok(())
+    }
+
+    /// Prepares arguments for emitting an extract lane operation.
+    pub fn extract_lane_op<F, M>(
+        &mut self,
+        masm: &mut M,
+        kind: ExtractLaneKind,
+        emit: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut M, Reg, WritableReg, ExtractLaneKind) -> Result<()>,
+        M: MacroAssembler,
+    {
+        let src = self.pop_to_reg(masm, None)?;
+        let dst = writable!(match kind {
+            ExtractLaneKind::I8x16S
+            | ExtractLaneKind::I8x16U
+            | ExtractLaneKind::I16x8S
+            | ExtractLaneKind::I16x8U
+            | ExtractLaneKind::I32x4
+            | ExtractLaneKind::I64x2 => self.any_gpr(masm)?,
+            ExtractLaneKind::F32x4 | ExtractLaneKind::F64x2 => src.reg,
+        });
+
+        emit(masm, src.reg, dst, kind)?;
+
+        match kind {
+            ExtractLaneKind::I8x16S
+            | ExtractLaneKind::I8x16U
+            | ExtractLaneKind::I16x8S
+            | ExtractLaneKind::I16x8U
+            | ExtractLaneKind::I32x4
+            | ExtractLaneKind::I64x2 => self.free_reg(src),
+            _ => (),
+        }
+
+        let dst = dst.to_reg();
+        let dst = match kind {
+            ExtractLaneKind::I8x16S
+            | ExtractLaneKind::I8x16U
+            | ExtractLaneKind::I16x8S
+            | ExtractLaneKind::I16x8U
+            | ExtractLaneKind::I32x4 => TypedReg::i32(dst),
+            ExtractLaneKind::I64x2 => TypedReg::i64(dst),
+            ExtractLaneKind::F32x4 => TypedReg::f32(dst),
+            ExtractLaneKind::F64x2 => TypedReg::f64(dst),
+        };
+
+        self.stack.push(Val::Reg(dst));
+        Ok(())
+    }
+
+    /// Prepares arguments for emitting a replace lane operation.
+    pub fn replace_lane_op<F, M>(
+        &mut self,
+        masm: &mut M,
+        kind: ReplaceLaneKind,
+        emit: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut M, RegImm, WritableReg, ReplaceLaneKind) -> Result<()>,
+        M: MacroAssembler,
+    {
+        let src = match kind {
+            ReplaceLaneKind::I8x16 | ReplaceLaneKind::I16x8 | ReplaceLaneKind::I32x4 => {
+                self.pop_i32_const().map(RegImm::i32)
+            }
+            ReplaceLaneKind::I64x2 => self.pop_i64_const().map(RegImm::i64),
+            ReplaceLaneKind::F32x4 => self.pop_f32_const().map(|v| RegImm::f32(v.bits())),
+            ReplaceLaneKind::F64x2 => self.pop_f64_const().map(|v| RegImm::f64(v.bits())),
+        }
+        .map_or_else(
+            || Ok(RegImm::reg(self.pop_to_reg(masm, None)?.into())),
+            Ok::<_, anyhow::Error>,
+        )?;
+
+        let dst = self.pop_to_reg(masm, None)?;
+
+        emit(masm, src, writable!(dst.into()), kind)?;
+
+        if let RegImm::Reg(reg) = src {
+            self.free_reg(reg);
+        }
+        self.stack.push(dst.into());
+
         Ok(())
     }
 
@@ -696,6 +835,36 @@ impl<'a> CodeGenContext<'a, Emission> {
         self.free_reg(rhs_lo);
         self.stack.push(lo.into());
         self.stack.push(hi.into());
+
+        Ok(())
+    }
+
+    /// Prepares to emit a vector `all_true` operation.
+    pub fn v128_all_true_op<F, M>(&mut self, masm: &mut M, emit: F) -> Result<()>
+    where
+        F: FnOnce(&mut M, Reg, Reg) -> Result<()>,
+        M: MacroAssembler,
+    {
+        let src = self.pop_to_reg(masm, None)?;
+        let dst = self.any_gpr(masm)?;
+        emit(masm, src.reg, dst)?;
+        self.free_reg(src);
+        self.stack.push(TypedReg::i32(dst).into());
+
+        Ok(())
+    }
+
+    /// Prepares to emit a vector `bitmask` operation.
+    pub fn v128_bitmask_op<F, M>(&mut self, masm: &mut M, emit: F) -> Result<()>
+    where
+        F: FnOnce(&mut M, Reg, Reg) -> Result<()>,
+        M: MacroAssembler,
+    {
+        let src = self.pop_to_reg(masm, None)?;
+        let dst = self.any_gpr(masm)?;
+        emit(masm, src.reg, dst)?;
+        self.free_reg(src);
+        self.stack.push(TypedReg::i32(dst).into());
 
         Ok(())
     }

@@ -15,7 +15,7 @@ pub struct ModuleConfig {
     // in our `*.wast` testing so keep knobs here so they can be read during
     // config-to-`wasmtime::Config` translation.
     pub function_references_enabled: bool,
-    pub component_model_more_flags: bool,
+    pub component_model_async: bool,
 }
 
 impl<'a> Arbitrary<'a> for ModuleConfig {
@@ -61,7 +61,7 @@ impl<'a> Arbitrary<'a> for ModuleConfig {
         config.disallow_traps = u.ratio(9, 10)?;
 
         Ok(ModuleConfig {
-            component_model_more_flags: false,
+            component_model_async: false,
             function_references_enabled: config.gc_enabled,
             config,
         })

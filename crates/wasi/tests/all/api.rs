@@ -10,7 +10,8 @@ use wasmtime_wasi::bindings::Command;
 use wasmtime_wasi::{
     add_to_linker_async,
     bindings::{clocks::wall_clock, filesystem::types as filesystem},
-    DirPerms, FilePerms, HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxBuilder, WasiView,
+    DirPerms, FilePerms, HostMonotonicClock, HostWallClock, IoView, WasiCtx, WasiCtxBuilder,
+    WasiView,
 };
 
 struct CommandCtx {
@@ -18,10 +19,12 @@ struct CommandCtx {
     wasi: WasiCtx,
 }
 
-impl WasiView for CommandCtx {
+impl IoView for CommandCtx {
     fn table(&mut self) -> &mut ResourceTable {
         &mut self.table
     }
+}
+impl WasiView for CommandCtx {
     fn ctx(&mut self) -> &mut WasiCtx {
         &mut self.wasi
     }
@@ -165,7 +168,7 @@ async fn api_reactor() -> Result<()> {
     // Note, this works because of the add_to_linker invocations using the
     // `host` crate for `streams`, not because of `with` in the bindgen macro.
     let writepipe = wasmtime_wasi::pipe::MemoryOutputPipe::new(4096);
-    let stream: wasmtime_wasi::OutputStream = Box::new(writepipe.clone());
+    let stream: wasmtime_wasi::DynOutputStream = Box::new(writepipe.clone());
     let table_ix = store.data_mut().table().push(stream)?;
     let r = reactor.call_write_strings_to(&mut store, table_ix).await?;
     assert_eq!(r, Ok(()));

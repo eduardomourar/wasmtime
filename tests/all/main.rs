@@ -42,6 +42,7 @@ mod stack_overflow;
 mod store;
 mod structs;
 mod table;
+mod tags;
 mod threads;
 mod traps;
 mod types;
@@ -105,4 +106,15 @@ pub(crate) fn small_pool_config() -> wasmtime::PoolingAllocationConfig {
     config.total_stacks(1);
 
     config
+}
+
+pub(crate) fn gc_store() -> wasmtime::Result<wasmtime::Store<()>> {
+    let _ = env_logger::try_init();
+
+    let mut config = wasmtime::Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+
+    let engine = wasmtime::Engine::new(&config)?;
+    Ok(wasmtime::Store::new(&engine, ()))
 }
