@@ -57,7 +57,9 @@
 use crate::prelude::*;
 use crate::runtime::vm::table::{Table, TableElementType};
 use crate::runtime::vm::vmcontext::VMFuncRef;
-use crate::runtime::vm::{HostResultHasUnwindSentinel, Instance, TrapReason, VMGcRef, VMStore};
+#[cfg(feature = "gc")]
+use crate::runtime::vm::VMGcRef;
+use crate::runtime::vm::{HostResultHasUnwindSentinel, Instance, TrapReason, VMStore};
 use core::convert::Infallible;
 use core::ptr::NonNull;
 #[cfg(feature = "threads")]
@@ -91,6 +93,7 @@ pub mod raw {
     #![allow(unused_doc_comments, unused_attributes)]
 
     use crate::runtime::vm::{InstanceAndStore, VMContext};
+    use core::ptr::NonNull;
 
     macro_rules! libcall {
         (
@@ -108,7 +111,7 @@ pub mod raw {
                 // with conversion of the return value in the face of traps.
                 #[allow(unused_variables, missing_docs)]
                 pub unsafe extern "C" fn $name(
-                    vmctx: *mut VMContext,
+                    vmctx: NonNull<VMContext>,
                     $( $pname : libcall!(@ty $param), )*
                 ) $(-> libcall!(@ty $result))? {
                     $(#[cfg($attr)])?
@@ -133,15 +136,15 @@ pub mod raw {
                 const _: () = {
                     #[used]
                     static I_AM_USED: unsafe extern "C" fn(
-                        *mut VMContext,
+                        NonNull<VMContext>,
                         $( $pname : libcall!(@ty $param), )*
                     ) $( -> libcall!(@ty $result))? = $name;
                 };
             )*
         };
 
-        (@ty i32) => (u32);
-        (@ty i64) => (u64);
+        (@ty u32) => (u32);
+        (@ty u64) => (u64);
         (@ty u8) => (u8);
         (@ty bool) => (bool);
         (@ty pointer) => (*mut u8);
@@ -1073,6 +1076,7 @@ fn out_of_gas(store: &mut dyn VMStore, _instance: &mut Instance) -> Result<()> {
 }
 
 // Hook for when an instance observes that the epoch has changed.
+#[cfg(target_has_atomic = "64")]
 fn new_epoch(store: &mut dyn VMStore, _instance: &mut Instance) -> Result<NextEpoch> {
     store.new_epoch().map(NextEpoch)
 }
@@ -1243,7 +1247,15 @@ fn raise(_store: &mut dyn VMStore, _instance: &mut Instance) {
     // SAFETY: this is only called from compiled wasm so we know that wasm has
     // already been entered. It's a dynamic safety precondition that the trap
     // information has already been arranged to be present.
-    unsafe { crate::runtime::vm::traphandlers::raise_preexisting_trap() }
+    #[cfg(has_host_compiler_backend)]
+    unsafe {
+        crate::runtime::vm::traphandlers::raise_preexisting_trap()
+    }
+
+    // When Cranelift isn't in use then this is an unused libcall for Pulley, so
+    // just insert a stub to catch bugs if it's accidentally called.
+    #[cfg(not(has_host_compiler_backend))]
+    unreachable!()
 }
 
 /// This module contains functions which are used for resolving relocations at

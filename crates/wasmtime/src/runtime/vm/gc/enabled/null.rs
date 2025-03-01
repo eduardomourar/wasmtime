@@ -9,11 +9,12 @@ use crate::{
     prelude::*,
     vm::{
         mmap::AlignedLength, ExternRefHostDataId, ExternRefHostDataTable, GarbageCollection,
-        GcHeap, GcHeapObject, GcProgress, GcRootsIter, Mmap, SendSyncUnsafeCell, TypedGcRef,
-        VMGcHeader, VMGcRef,
+        GcHeap, GcHeapObject, GcProgress, GcRootsIter, GcRuntime, Mmap, SendSyncUnsafeCell,
+        TypedGcRef, VMGcHeader, VMGcRef,
     },
     GcHeapOutOfMemory,
 };
+use core::ptr::NonNull;
 use core::{
     alloc::Layout,
     any::Any,
@@ -309,8 +310,8 @@ unsafe impl GcHeap for NullHeap {
         Box::new(NullCollection {})
     }
 
-    unsafe fn vmctx_gc_heap_data(&self) -> *mut u8 {
-        self.next.get().cast()
+    unsafe fn vmctx_gc_heap_data(&self) -> NonNull<u8> {
+        NonNull::new(self.next.get()).unwrap().cast()
     }
 
     #[cfg(feature = "pooling-allocator")]

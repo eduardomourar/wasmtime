@@ -70,11 +70,8 @@ use crate::bindings::{
     },
     clocks::{monotonic_clock, wall_clock},
     filesystem::{preopens::Host as _, types as filesystem},
-    io::streams,
 };
-use crate::{
-    FsError, IsATTY, ResourceTable, StreamError, StreamResult, WasiCtx, WasiImpl, WasiView,
-};
+use crate::{FsError, IsATTY, ResourceTable, WasiCtx, WasiImpl, WasiView};
 use anyhow::{bail, Context};
 use std::collections::{BTreeMap, HashSet};
 use std::mem::{self, size_of, size_of_val};
@@ -84,14 +81,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use system_interface::fs::FileIoExt;
 use wasmtime::component::Resource;
+use wasmtime_wasi_io::{
+    bindings::wasi::io::streams,
+    streams::{StreamError, StreamResult},
+    IoImpl, IoView,
+};
 use wiggle::tracing::instrument;
 use wiggle::{GuestError, GuestMemory, GuestPtr, GuestType};
 
 // Bring all WASI traits in scope that this implementation builds on.
 use crate::bindings::cli::environment::Host as _;
 use crate::bindings::filesystem::types::HostDescriptor as _;
-use crate::bindings::io::poll::Host as _;
 use crate::bindings::random::random::Host as _;
+use wasmtime_wasi_io::bindings::wasi::io::poll::Host as _;
 
 /// Structure containing state for WASIp1.
 ///
@@ -153,14 +155,19 @@ impl WasiP1Ctx {
     }
 
     fn as_wasi_impl(&mut self) -> WasiImpl<&mut Self> {
-        WasiImpl(self)
+        WasiImpl(IoImpl(self))
+    }
+    fn as_io_impl(&mut self) -> IoImpl<&mut Self> {
+        IoImpl(self)
     }
 }
 
-impl WasiView for WasiP1Ctx {
+impl IoView for WasiP1Ctx {
     fn table(&mut self) -> &mut ResourceTable {
         &mut self.table
     }
+}
+impl WasiView for WasiP1Ctx {
     fn ctx(&mut self) -> &mut WasiCtx {
         &mut self.wasi
     }
@@ -648,7 +655,7 @@ impl WasiP1Ctx {
                 drop(t);
                 let buf = first_non_empty_ciovec(memory, ciovs)?;
                 let n = BlockingMode::Blocking
-                    .write(memory, &mut self.as_wasi_impl(), stream, buf)
+                    .write(memory, &mut self.as_io_impl(), stream, buf)
                     .await?
                     .try_into()?;
                 Ok(n)
@@ -667,14 +674,16 @@ enum FdWrite {
 /// Adds asynchronous versions of all WASIp1 functions to the
 /// [`wasmtime::Linker`] provided.
 ///
-/// This method will add WASIp1 functions to `linker`. The `f` closure provided
-/// is used to project from the `T` state that `Linker` is associated with to a
-/// [`WasiP1Ctx`]. If `T` is `WasiP1Ctx` itself then this is the identity
-/// closure, but otherwise it must project out the field where `WasiP1Ctx` is
-/// stored within `T`.
+/// This method will add WASIp1 functions to `linker`. Access to [`WasiP1Ctx`]
+/// is provided with `f` by projecting from the store-local state of `T` to
+/// [`WasiP1Ctx`]. The closure `f` is invoked every time a WASIp1 function is
+/// called to get access to [`WASIp1`] from `T`. The returned [`WasiP1Ctx`] is
+/// used to implement I/O and controls what each function will return.
 ///
-/// The state provided by `f` is used to implement all WASIp1 functions and
-/// provides configuration to know what to return.
+/// It's recommended that [`WasiP1Ctx`] is stored as a field in `T` or that `T =
+/// WasiP1Ctx` itself. The closure `f` should be a small projection (e.g. `&mut
+/// arg.field`) or something otherwise "small" as it will be executed every time
+/// a WASI call is made.
 ///
 /// Note that this function is intended for use with
 /// [`Config::async_support(true)`]. If you're looking for a synchronous version
@@ -739,14 +748,16 @@ pub fn add_to_linker_async<T: Send>(
 /// Adds synchronous versions of all WASIp1 functions to the
 /// [`wasmtime::Linker`] provided.
 ///
-/// This method will add WASIp1 functions to `linker`. The `f` closure provided
-/// is used to project from the `T` state that `Linker` is associated with to a
-/// [`WasiP1Ctx`]. If `T` is `WasiP1Ctx` itself then this is the identity
-/// closure, but otherwise it must project out the field where `WasiP1Ctx` is
-/// stored within `T`.
+/// This method will add WASIp1 functions to `linker`. Access to [`WasiP1Ctx`]
+/// is provided with `f` by projecting from the store-local state of `T` to
+/// [`WasiP1Ctx`]. The closure `f` is invoked every time a WASIp1 function is
+/// called to get access to [`WASIp1`] from `T`. The returned [`WasiP1Ctx`] is
+/// used to implement I/O and controls what each function will return.
 ///
-/// The state provided by `f` is used to implement all WASIp1 functions and
-/// provides configuration to know what to return.
+/// It's recommended that [`WasiP1Ctx`] is stored as a field in `T` or that `T =
+/// WasiP1Ctx` itself. The closure `f` should be a small projection (e.g. `&mut
+/// arg.field`) or something otherwise "small" as it will be executed every time
+/// a WASI call is made.
 ///
 /// Note that this function is intended for use with
 /// [`Config::async_support(false)`]. If you're looking for a synchronous version
@@ -1323,12 +1334,12 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiP1Ctx {
             .ok_or(types::Errno::Badf)?;
         match desc {
             Descriptor::Stdin { stream, .. } => {
-                streams::HostInputStream::drop(&mut self.as_wasi_impl(), stream)
+                streams::HostInputStream::drop(&mut self.as_io_impl(), stream)
                     .await
                     .context("failed to call `drop` on `input-stream`")
             }
             Descriptor::Stdout { stream, .. } | Descriptor::Stderr { stream, .. } => {
-                streams::HostOutputStream::drop(&mut self.as_wasi_impl(), stream)
+                streams::HostOutputStream::drop(&mut self.as_io_impl(), stream)
                     .await
                     .context("failed to call `drop` on `output-stream`")
             }
@@ -1679,7 +1690,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiP1Ctx {
                 drop(t);
                 let buf = first_non_empty_iovec(memory, iovs)?;
                 let read = BlockingMode::Blocking
-                    .read(&mut self.as_wasi_impl(), stream, buf.len().try_into()?)
+                    .read(&mut self.as_io_impl(), stream, buf.len().try_into()?)
                     .await?;
                 if read.len() > buf.len().try_into()? {
                     return Err(types::Errno::Range.into());
@@ -1717,12 +1728,12 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiP1Ctx {
                 let stream = self.as_wasi_impl().read_via_stream(fd, offset)?;
                 let read = blocking_mode
                     .read(
-                        &mut self.as_wasi_impl(),
+                        &mut self.as_io_impl(),
                         stream.borrowed(),
                         buf.len().try_into()?,
                     )
                     .await;
-                streams::HostInputStream::drop(&mut self.as_wasi_impl(), stream)
+                streams::HostInputStream::drop(&mut self.as_io_impl(), stream)
                     .await
                     .map_err(|e| types::Error::trap(e))?;
                 (buf, read?)
@@ -2367,7 +2378,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiP1Ctx {
                             _ => return Err(types::Errno::Badf.into()),
                         }
                     };
-                    streams::HostInputStream::subscribe(&mut self.as_wasi_impl(), stream)
+                    streams::HostInputStream::subscribe(&mut self.as_io_impl(), stream)
                         .context("failed to call `subscribe` on `input-stream`")
                         .map_err(types::Error::trap)?
                 }
@@ -2401,7 +2412,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiP1Ctx {
                             _ => return Err(types::Errno::Badf.into()),
                         }
                     };
-                    streams::HostOutputStream::subscribe(&mut self.as_wasi_impl(), stream)
+                    streams::HostOutputStream::subscribe(&mut self.as_io_impl(), stream)
                         .context("failed to call `subscribe` on `output-stream`")
                         .map_err(types::Error::trap)?
                 }
@@ -2409,7 +2420,7 @@ impl wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiP1Ctx {
             pollables.push(p);
         }
         let ready: HashSet<_> = self
-            .as_wasi_impl()
+            .as_io_impl()
             .poll(pollables)
             .await
             .context("failed to call `poll-oneoff`")

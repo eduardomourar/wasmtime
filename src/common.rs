@@ -160,7 +160,8 @@ impl RunCommon {
             Some("-") => "/dev/stdin".as_ref(),
             _ => path,
         };
-        let file = File::open(path)?;
+        let file =
+            File::open(path).with_context(|| format!("failed to open wasm module {path:?}"))?;
 
         // First attempt to load the module as an mmap. If this succeeds then
         // detection can be done with the contents of the mmap and if a
@@ -357,6 +358,7 @@ impl Profile {
             ["perfmap"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::PerfMap)),
             ["jitdump"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::JitDump)),
             ["vtune"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::VTune)),
+            ["pulley"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::Pulley)),
             ["guest"] => Ok(Profile::Guest {
                 path: "wasmtime-guest-profile.json".to_string(),
                 interval: Duration::from_millis(10),

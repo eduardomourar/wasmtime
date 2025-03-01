@@ -28,6 +28,12 @@ use wasmtime_environ::{
 };
 use wasmtime_environ::{FUNCREF_INIT_BIT, FUNCREF_MASK};
 
+#[derive(Debug)]
+pub(crate) enum Extension {
+    Sign,
+    Zero,
+}
+
 /// A struct with an `Option<ir::FuncRef>` member for every builtin
 /// function, to de-duplicate constructing/getting its function.
 pub(crate) struct BuiltinFunctions {
@@ -124,17 +130,17 @@ pub struct FuncEnvironment<'module_environment> {
     /// A function-local variable which stores the cached value of the amount of
     /// fuel remaining to execute. If used this is modified frequently so it's
     /// stored locally as a variable instead of always referenced from the field
-    /// in `*const VMRuntimeLimits`
+    /// in `*const VMStoreContext`
     fuel_var: cranelift_frontend::Variable,
 
     /// A function-local variable which caches the value of `*const
-    /// VMRuntimeLimits` for this function's vmctx argument. This pointer is stored
+    /// VMStoreContext` for this function's vmctx argument. This pointer is stored
     /// in the vmctx itself, but never changes for the lifetime of the function,
     /// so if we load it up front we can continue to use it throughout.
-    vmruntime_limits_ptr: ir::Value,
+    vmstore_context_ptr: ir::Value,
 
     /// A cached epoch deadline value, when performing epoch-based
-    /// interruption. Loaded from `VMRuntimeLimits` and reloaded after
+    /// interruption. Loaded from `VMStoreContext` and reloaded after
     /// any yield.
     epoch_deadline_var: cranelift_frontend::Variable,
 
@@ -193,7 +199,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             fuel_var: Variable::new(0),
             epoch_deadline_var: Variable::new(0),
             epoch_ptr_var: Variable::new(0),
-            vmruntime_limits_ptr: ir::Value::reserved_value(),
+            vmstore_context_ptr: ir::Value::reserved_value(),
 
             // Start with at least one fuel being consumed because even empty
             // functions should consume at least some fuel.
@@ -298,8 +304,8 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         }
     }
 
-    fn declare_vmruntime_limits_ptr(&mut self, builder: &mut FunctionBuilder<'_>) {
-        // We load the `*const VMRuntimeLimits` value stored within vmctx at the
+    fn declare_vmstore_context_ptr(&mut self, builder: &mut FunctionBuilder<'_>) {
+        // We load the `*const VMStoreContext` value stored within vmctx at the
         // head of the function and reuse the same value across the entire
         // function. This is possible since we know that the pointer never
         // changes for the lifetime of the function.
@@ -307,8 +313,8 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         let vmctx = self.vmctx(builder.func);
         let base = builder.ins().global_value(pointer_type, vmctx);
         let offset = i32::from(self.offsets.ptr.vmctx_runtime_limits());
-        debug_assert!(self.vmruntime_limits_ptr.is_reserved_value());
-        self.vmruntime_limits_ptr =
+        debug_assert!(self.vmstore_context_ptr.is_reserved_value());
+        self.vmstore_context_ptr =
             builder
                 .ins()
                 .load(pointer_type, ir::MemFlags::trusted(), base, offset);
@@ -318,7 +324,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         // On function entry we load the amount of fuel into a function-local
         // `self.fuel_var` to make fuel modifications fast locally. This cache
         // is then periodically flushed to the Store-defined location in
-        // `VMRuntimeLimits` later.
+        // `VMStoreContext` later.
         builder.declare_var(self.fuel_var, ir::types::I64);
         self.fuel_load_into_var(builder);
         self.fuel_check(builder);
@@ -366,13 +372,13 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         match op {
             // Exiting a function (via a return or unreachable) or otherwise
             // entering a different function (via a call) means that we need to
-            // update the fuel consumption in `VMRuntimeLimits` because we're
+            // update the fuel consumption in `VMStoreContext` because we're
             // about to move control out of this function itself and the fuel
             // may need to be read.
             //
             // Before this we need to update the fuel counter from our own cost
             // leading up to this function call, and then we can store
-            // `self.fuel_var` into `VMRuntimeLimits`.
+            // `self.fuel_var` into `VMStoreContext`.
             Operator::Unreachable
             | Operator::Return
             | Operator::CallIndirect { .. }
@@ -457,7 +463,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         builder.def_var(self.fuel_var, fuel);
     }
 
-    /// Loads the fuel consumption value from `VMRuntimeLimits` into `self.fuel_var`
+    /// Loads the fuel consumption value from `VMStoreContext` into `self.fuel_var`
     fn fuel_load_into_var(&mut self, builder: &mut FunctionBuilder<'_>) {
         let (addr, offset) = self.fuel_addr_offset();
         let fuel = builder
@@ -467,7 +473,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     }
 
     /// Stores the fuel consumption value from `self.fuel_var` into
-    /// `VMRuntimeLimits`.
+    /// `VMStoreContext`.
     fn fuel_save_from_var(&mut self, builder: &mut FunctionBuilder<'_>) {
         let (addr, offset) = self.fuel_addr_offset();
         let fuel_consumed = builder.use_var(self.fuel_var);
@@ -477,12 +483,12 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     }
 
     /// Returns the `(address, offset)` of the fuel consumption within
-    /// `VMRuntimeLimits`, used to perform loads/stores later.
+    /// `VMStoreContext`, used to perform loads/stores later.
     fn fuel_addr_offset(&mut self) -> (ir::Value, ir::immediates::Offset32) {
-        debug_assert!(!self.vmruntime_limits_ptr.is_reserved_value());
+        debug_assert!(!self.vmstore_context_ptr.is_reserved_value());
         (
-            self.vmruntime_limits_ptr,
-            i32::from(self.offsets.ptr.vmruntime_limits_fuel_consumed()).into(),
+            self.vmstore_context_ptr,
+            i32::from(self.offsets.ptr.vmstore_context_fuel_consumed()).into(),
         )
     }
 
@@ -666,15 +672,12 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         // We keep the deadline cached in a register to speed the checks
         // in the common case (between epoch ticks) but we want to do a
         // precise check here by reloading the cache first.
-        let deadline =
-            builder.ins().load(
-                ir::types::I64,
-                ir::MemFlags::trusted(),
-                self.vmruntime_limits_ptr,
-                ir::immediates::Offset32::new(
-                    self.offsets.ptr.vmruntime_limits_epoch_deadline() as i32
-                ),
-            );
+        let deadline = builder.ins().load(
+            ir::types::I64,
+            ir::MemFlags::trusted(),
+            self.vmstore_context_ptr,
+            ir::immediates::Offset32::new(self.offsets.ptr.vmstore_context_epoch_deadline() as i32),
+        );
         builder.def_var(self.epoch_deadline_var, deadline);
         self.epoch_check_cached(builder, cur_epoch_value, continuation_block);
 
@@ -1400,7 +1403,7 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
                 // If `ty_index` matches `table_ty`, then this call is
                 // statically known to have the right type, so no checks are
                 // necessary.
-                let specified_ty = self.env.module.types[ty_index];
+                let specified_ty = self.env.module.types[ty_index].unwrap_module_type_index();
                 if specified_ty == table_ty {
                     return CheckIndirectCallTypeSignature::StaticMatch {
                         may_be_null: table.ref_type.nullable,
@@ -1452,6 +1455,8 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
                 return CheckIndirectCallTypeSignature::StaticTrap;
             }
 
+            WasmHeapType::Cont | WasmHeapType::ConcreteCont(_) | WasmHeapType::NoCont => todo!(), // FIXME: #10248 stack switching support.
+
             // Engine-indexed types don't show up until runtime and it's a Wasm
             // validation error to perform a call through a non-function table,
             // so these cases are dynamically not reachable.
@@ -1472,7 +1477,7 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         }
 
         // Load the caller's `VMSharedTypeIndex.
-        let interned_ty = self.env.module.types[ty_index];
+        let interned_ty = self.env.module.types[ty_index].unwrap_module_type_index();
         let caller_sig_id = self
             .env
             .module_interned_to_shared_ty(&mut self.builder.cursor(), interned_ty);
@@ -1671,13 +1676,17 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
 
 impl TypeConvert for FuncEnvironment<'_> {
     fn lookup_heap_type(&self, ty: wasmparser::UnpackedIndex) -> WasmHeapType {
-        wasmtime_environ::WasmparserTypeConverter::new(self.types, |idx| self.module.types[idx])
-            .lookup_heap_type(ty)
+        wasmtime_environ::WasmparserTypeConverter::new(self.types, |idx| {
+            self.module.types[idx].unwrap_module_type_index()
+        })
+        .lookup_heap_type(ty)
     }
 
     fn lookup_type_index(&self, index: wasmparser::UnpackedIndex) -> EngineOrModuleTypeIndex {
-        wasmtime_environ::WasmparserTypeConverter::new(self.types, |idx| self.module.types[idx])
-            .lookup_type_index(index)
+        wasmtime_environ::WasmparserTypeConverter::new(self.types, |idx| {
+            self.module.types[idx].unwrap_module_type_index()
+        })
+        .lookup_type_index(index)
     }
 }
 
@@ -1691,6 +1700,7 @@ impl<'module_environment> TargetEnvironment for FuncEnvironment<'module_environm
         let needs_stack_map = match wasm_ty.top() {
             WasmHeapTopType::Extern | WasmHeapTopType::Any => true,
             WasmHeapTopType::Func => false,
+            WasmHeapTopType::Cont => todo!(), // FIXME: #10248 stack switching support.
         };
         (ty, needs_stack_map)
     }
@@ -1806,6 +1816,9 @@ impl FuncEnvironment<'_> {
             WasmHeapTopType::Func => {
                 Ok(self.get_or_init_func_ref_table_elem(builder, table_index, index, false))
             }
+
+            // Continuation types.
+            WasmHeapTopType::Cont => todo!(), // FIXME: #10248 stack switching support.
         }
     }
 
@@ -1852,6 +1865,9 @@ impl FuncEnvironment<'_> {
                     .store(flags, value_with_init_bit, elem_addr, 0);
                 Ok(())
             }
+
+            // Continuation types.
+            WasmHeapTopType::Cont => todo!(), // FIXME: #10248 stack switching support.
         }
     }
 
@@ -1925,7 +1941,7 @@ impl FuncEnvironment<'_> {
     }
 
     pub fn struct_fields_len(&mut self, struct_type_index: TypeIndex) -> WasmResult<usize> {
-        let ty = self.module.types[struct_type_index];
+        let ty = self.module.types[struct_type_index].unwrap_module_type_index();
         match &self.types[ty].composite_type.inner {
             WasmCompositeInnerType::Struct(s) => Ok(s.fields.len()),
             _ => unreachable!(),
@@ -1955,28 +1971,16 @@ impl FuncEnvironment<'_> {
         struct_type_index: TypeIndex,
         field_index: u32,
         struct_ref: ir::Value,
+        extension: Option<Extension>,
     ) -> WasmResult<ir::Value> {
-        gc::translate_struct_get(self, builder, struct_type_index, field_index, struct_ref)
-    }
-
-    pub fn translate_struct_get_s(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        struct_type_index: TypeIndex,
-        field_index: u32,
-        struct_ref: ir::Value,
-    ) -> WasmResult<ir::Value> {
-        gc::translate_struct_get_s(self, builder, struct_type_index, field_index, struct_ref)
-    }
-
-    pub fn translate_struct_get_u(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        struct_type_index: TypeIndex,
-        field_index: u32,
-        struct_ref: ir::Value,
-    ) -> WasmResult<ir::Value> {
-        gc::translate_struct_get_u(self, builder, struct_type_index, field_index, struct_ref)
+        gc::translate_struct_get(
+            self,
+            builder,
+            struct_type_index,
+            field_index,
+            struct_ref,
+            extension,
+        )
     }
 
     pub fn translate_struct_set(
@@ -2035,7 +2039,7 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<ir::Value> {
         let libcall = gc::builtins::array_new_data(self, builder.func)?;
         let vmctx = self.vmctx_val(&mut builder.cursor());
-        let interned_type_index = self.module.types[array_type_index];
+        let interned_type_index = self.module.types[array_type_index].unwrap_module_type_index();
         let interned_type_index = builder
             .ins()
             .iconst(I32, i64::from(interned_type_index.as_u32()));
@@ -2058,7 +2062,7 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<ir::Value> {
         let libcall = gc::builtins::array_new_elem(self, builder.func)?;
         let vmctx = self.vmctx_val(&mut builder.cursor());
-        let interned_type_index = self.module.types[array_type_index];
+        let interned_type_index = self.module.types[array_type_index].unwrap_module_type_index();
         let interned_type_index = builder
             .ins()
             .iconst(I32, i64::from(interned_type_index.as_u32()));
@@ -2115,7 +2119,7 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<()> {
         let libcall = gc::builtins::array_init_data(self, builder.func)?;
         let vmctx = self.vmctx_val(&mut builder.cursor());
-        let interned_type_index = self.module.types[array_type_index];
+        let interned_type_index = self.module.types[array_type_index].unwrap_module_type_index();
         let interned_type_index = builder
             .ins()
             .iconst(I32, i64::from(interned_type_index.as_u32()));
@@ -2147,7 +2151,7 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<()> {
         let libcall = gc::builtins::array_init_elem(self, builder.func)?;
         let vmctx = self.vmctx_val(&mut builder.cursor());
-        let interned_type_index = self.module.types[array_type_index];
+        let interned_type_index = self.module.types[array_type_index].unwrap_module_type_index();
         let interned_type_index = builder
             .ins()
             .iconst(I32, i64::from(interned_type_index.as_u32()));
@@ -2181,28 +2185,9 @@ impl FuncEnvironment<'_> {
         array_type_index: TypeIndex,
         array: ir::Value,
         index: ir::Value,
+        extension: Option<Extension>,
     ) -> WasmResult<ir::Value> {
-        gc::translate_array_get(self, builder, array_type_index, array, index)
-    }
-
-    pub fn translate_array_get_s(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        array_type_index: TypeIndex,
-        array: ir::Value,
-        index: ir::Value,
-    ) -> WasmResult<ir::Value> {
-        gc::translate_array_get_s(self, builder, array_type_index, array, index)
-    }
-
-    pub fn translate_array_get_u(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        array_type_index: TypeIndex,
-        array: ir::Value,
-        index: ir::Value,
-    ) -> WasmResult<ir::Value> {
-        gc::translate_array_get_u(self, builder, array_type_index, array, index)
+        gc::translate_array_get(self, builder, array_type_index, array, index, extension)
     }
 
     pub fn translate_array_set(
@@ -2234,6 +2219,7 @@ impl FuncEnvironment<'_> {
             WasmHeapTopType::Func => pos.ins().iconst(self.pointer_type(), 0),
             // NB: null GC references don't need to be in stack maps.
             WasmHeapTopType::Any | WasmHeapTopType::Extern => pos.ins().iconst(types::I32, 0),
+            WasmHeapTopType::Cont => todo!(), // FIXME: #10248 stack switching support.
         })
     }
 
@@ -2538,7 +2524,7 @@ impl FuncEnvironment<'_> {
         func: &mut ir::Function,
         index: TypeIndex,
     ) -> WasmResult<ir::SigRef> {
-        let interned_index = self.module.types[index];
+        let interned_index = self.module.types[index].unwrap_module_type_index();
         let wasm_func_ty = self.types[interned_index].unwrap_func();
         let sig = crate::wasm_call_signature(self.isa, wasm_func_ty, &self.tunables);
         let sig_ref = func.import_signature(sig);
@@ -2551,7 +2537,9 @@ impl FuncEnvironment<'_> {
         func: &mut ir::Function,
         index: FuncIndex,
     ) -> WasmResult<ir::FuncRef> {
-        let sig = self.module.functions[index].signature;
+        let sig = self.module.functions[index]
+            .signature
+            .unwrap_module_type_index();
         let wasm_func_ty = self.types[sig].unwrap_func();
         let sig = crate::wasm_call_signature(self.isa, wasm_func_ty, &self.tunables);
         let signature = func.import_signature(sig);
@@ -3097,10 +3085,10 @@ impl FuncEnvironment<'_> {
             self.conditionally_trap(builder, overflow, ir::TrapCode::STACK_OVERFLOW);
         }
 
-        // If the `vmruntime_limits_ptr` variable will get used then we initialize
-        // it here.
+        // If the `vmstore_context_ptr` variable will get used then we
+        // initialize it here.
         if self.tunables.consume_fuel || self.tunables.epoch_interruption {
-            self.declare_vmruntime_limits_ptr(builder);
+            self.declare_vmstore_context_ptr(builder);
         }
         // Additionally we initialize `fuel_var` if it will get used.
         if self.tunables.consume_fuel {
@@ -3409,7 +3397,7 @@ impl FuncEnvironment<'_> {
     /// being targeted since the Pulley runtime doesn't catch segfaults for
     /// itself.
     pub fn clif_memory_traps_enabled(&self) -> bool {
-        self.tunables.signals_based_traps && !self.isa.triple().is_pulley()
+        self.tunables.signals_based_traps && !self.is_pulley()
     }
 
     /// Returns whether it's acceptable to have CLIF instructions natively trap,
@@ -3419,7 +3407,21 @@ impl FuncEnvironment<'_> {
     /// unconditionally since Pulley doesn't use hardware-based traps in its
     /// runtime.
     pub fn clif_instruction_traps_enabled(&self) -> bool {
-        self.tunables.signals_based_traps || self.isa.triple().is_pulley()
+        self.tunables.signals_based_traps || self.is_pulley()
+    }
+
+    /// Returns whether loads from the null address are allowed as signals of
+    /// whether to trap or not.
+    pub fn load_from_zero_allowed(&self) -> bool {
+        // Pulley allows loads-from-zero and otherwise this is only allowed with
+        // traps + spectre mitigations.
+        self.is_pulley()
+            || (self.clif_memory_traps_enabled() && self.heap_access_spectre_mitigation())
+    }
+
+    /// Returns whether translation is happening for Pulley bytecode.
+    pub fn is_pulley(&self) -> bool {
+        self.isa.triple().is_pulley()
     }
 }
 

@@ -5,6 +5,7 @@ use crate::runtime::vm::{
     ExternRefHostDataId, ExternRefHostDataTable, GcHeapObject, SendSyncPtr, TypedGcRef, VMArrayRef,
     VMExternRef, VMGcHeader, VMGcObjectDataMut, VMGcRef, VMStructRef,
 };
+use core::ptr::NonNull;
 use core::{
     alloc::Layout, any::Any, cell::UnsafeCell, marker, mem, num::NonZeroUsize, ops::Range, ptr,
 };
@@ -36,6 +37,7 @@ pub unsafe trait GcRuntime: 'static + Send + Sync {
     fn layouts(&self) -> &dyn GcTypeLayouts;
 
     /// Construct a new GC heap.
+    #[cfg(feature = "gc")]
     fn new_gc_heap(&self) -> Result<Box<dyn GcHeap>>;
 }
 
@@ -353,7 +355,7 @@ pub unsafe trait GcHeap: 'static + Send + Sync {
     ///
     /// The returned pointer, if any, must remain valid as long as `self` is not
     /// dropped.
-    unsafe fn vmctx_gc_heap_data(&self) -> *mut u8;
+    unsafe fn vmctx_gc_heap_data(&self) -> NonNull<u8>;
 
     ////////////////////////////////////////////////////////////////////////////
     // Recycling GC Heap Methods
@@ -523,11 +525,19 @@ pub struct GcRootsList(Vec<RawGcRoot>);
 //    contents of the roots list (when it is non-empty, during GCs) borrow from
 //    the store, which creates self-references.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    not(feature = "gc"),
+    expect(
+        dead_code,
+        reason = "not worth it at this time to #[cfg] away these variants",
+    )
+)]
 enum RawGcRoot {
     Stack(SendSyncPtr<u32>),
     NonStack(SendSyncPtr<VMGcRef>),
 }
 
+#[cfg(feature = "gc")]
 impl GcRootsList {
     /// Add a GC root that is inside a Wasm stack frame to this list.
     #[inline]

@@ -25,7 +25,6 @@ pub use self::emit::*;
 
 pub use crate::isa::pulley_shared::lower::isle::generated_code::MInst as Inst;
 pub use crate::isa::pulley_shared::lower::isle::generated_code::RawInst;
-pub use crate::isa::pulley_shared::lower::isle::generated_code::VExtKind;
 
 impl From<RawInst> for Inst {
     fn from(raw: RawInst) -> Inst {
@@ -66,7 +65,6 @@ impl Inst {
                 mem,
                 ty,
                 flags,
-                ext: VExtKind::None,
             }
         } else if ty.is_int() {
             assert!(ty.bytes() <= 8);
@@ -75,7 +73,6 @@ impl Inst {
                 mem,
                 ty,
                 flags,
-                ext: ExtKind::None,
             }
         } else {
             Inst::FLoad {
@@ -127,6 +124,10 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             for RetPair { vreg, preg } in rets {
                 collector.reg_fixed_use(vreg, *preg);
             }
+        }
+
+        Inst::DummyUse { reg } => {
+            collector.reg_use(reg);
         }
 
         Inst::Nop => {}
@@ -200,7 +201,17 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             }
         }
         Inst::ReturnIndirectCall { info } => {
-            collector.reg_use(&mut info.dest);
+            // Use a fixed location of where to store the value to
+            // return-call-to. Using a fixed location prevents this register
+            // from being allocated to a callee-saved register which will get
+            // clobbered during the register restores just before the
+            // return-call.
+            //
+            // Also note that `x15` is specifically the last caller-saved
+            // register and, at this time, the only non-argument caller-saved
+            // register. This register allocation constraint is why it's not an
+            // argument register.
+            collector.reg_fixed_use(&mut info.dest, regs::x15());
 
             for CallArgPair { vreg, preg } in &mut info.uses {
                 collector.reg_fixed_use(vreg, *preg);
@@ -227,7 +238,6 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             mem,
             ty: _,
             flags: _,
-            ext: _,
         } => {
             collector.reg_def(dst);
             mem.get_operands(collector);
@@ -268,7 +278,6 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             mem,
             ty: _,
             flags: _,
-            ext: _,
         } => {
             collector.reg_def(dst);
             mem.get_operands(collector);
@@ -368,8 +377,8 @@ where
 
     const TRAP_OPCODE: &'static [u8] = TRAP_OPCODE;
 
-    fn gen_dummy_use(_reg: Reg) -> Self {
-        todo!()
+    fn gen_dummy_use(reg: Reg) -> Self {
+        Inst::DummyUse { reg }.into()
     }
 
     fn canonical_type_for_rc(rc: RegClass) -> Type {
@@ -573,16 +582,6 @@ impl Inst {
 
         let format_reg = |reg: Reg| -> String { reg_name(reg) };
 
-        let format_ext = |ext: ExtKind| -> &'static str {
-            match ext {
-                ExtKind::None => "",
-                ExtKind::Sign32 => "_s32",
-                ExtKind::Sign64 => "_s64",
-                ExtKind::Zero32 => "_u32",
-                ExtKind::Zero64 => "_u64",
-            }
-        };
-
         match self {
             Inst::Args { args } => {
                 let mut s = "args".to_string();
@@ -601,6 +600,11 @@ impl Inst {
                     write!(&mut s, " {vreg}={preg}").unwrap();
                 }
                 s
+            }
+
+            Inst::DummyUse { reg } => {
+                let reg = format_reg(*reg);
+                format!("dummy_use {reg}")
             }
 
             Inst::TrapIf { cond, code } => {
@@ -665,13 +669,11 @@ impl Inst {
                 mem,
                 ty,
                 flags,
-                ext,
             } => {
                 let dst = format_reg(*dst.to_reg());
                 let ty = ty.bits();
-                let ext = format_ext(*ext);
                 let mem = mem.to_string();
-                format!("{dst} = xload{ty}{ext} {mem} // flags ={flags}")
+                format!("{dst} = xload{ty} {mem} // flags ={flags}")
             }
 
             Inst::XStore {
@@ -715,12 +717,11 @@ impl Inst {
                 mem,
                 ty,
                 flags,
-                ext,
             } => {
                 let dst = format_reg(*dst.to_reg());
                 let ty = ty.bits();
                 let mem = mem.to_string();
-                format!("{dst} = vload{ty}_{ext:?} {mem} // flags ={flags}")
+                format!("{dst} = vload{ty} {mem} // flags ={flags}")
             }
 
             Inst::VStore {

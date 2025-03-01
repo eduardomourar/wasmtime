@@ -263,6 +263,7 @@ fn wasm_to_table_type(ty: WasmRefType) -> TableElementType {
     match ty.heap_type.top() {
         WasmHeapTopType::Func => TableElementType::Func,
         WasmHeapTopType::Any | WasmHeapTopType::Extern => TableElementType::GcRef,
+        WasmHeapTopType::Cont => todo!(), // FIXME: #10248 stack switching support.
     }
 }
 
@@ -568,7 +569,7 @@ impl Table {
         if delta == 0 {
             return Ok(Some(old_size));
         }
-        // Cannot return `Trap::TableOutOfBounds` here becase `impl std::error::Error for Trap` is not available in no-std.
+        // Cannot return `Trap::TableOutOfBounds` here because `impl std::error::Error for Trap` is not available in no-std.
         let delta =
             usize::try_from(delta).map_err(|_| format_err!("delta exceeds host pointer size"))?;
 
@@ -740,25 +741,29 @@ impl Table {
         match self {
             Table::Static(StaticTable::Func(StaticFuncTable { data, size, .. })) => {
                 VMTableDefinition {
-                    base: data.as_ptr().cast(),
+                    base: data.cast().into(),
                     current_elements: *size,
                 }
             }
             Table::Static(StaticTable::GcRef(StaticGcRefTable { data, size })) => {
                 VMTableDefinition {
-                    base: data.as_ptr().cast(),
+                    base: data.cast().into(),
                     current_elements: *size,
                 }
             }
             Table::Dynamic(DynamicTable::Func(DynamicFuncTable { elements, .. })) => {
                 VMTableDefinition {
-                    base: elements.as_mut_ptr().cast(),
+                    base: NonNull::<[FuncTableElem]>::from(&mut elements[..])
+                        .cast()
+                        .into(),
                     current_elements: elements.len(),
                 }
             }
             Table::Dynamic(DynamicTable::GcRef(DynamicGcRefTable { elements, .. })) => {
                 VMTableDefinition {
-                    base: elements.as_mut_ptr().cast(),
+                    base: NonNull::<[Option<VMGcRef>]>::from(&mut elements[..])
+                        .cast()
+                        .into(),
                     current_elements: elements.len(),
                 }
             }

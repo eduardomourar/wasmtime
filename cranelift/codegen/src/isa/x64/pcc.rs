@@ -840,8 +840,9 @@ pub(crate) fn check(
         | Inst::ReturnCallKnown { .. }
         | Inst::JmpKnown { .. }
         | Inst::Ret { .. }
-        | Inst::JmpIf { .. }
+        | Inst::WinchJmpIf { .. }
         | Inst::JmpCond { .. }
+        | Inst::JmpCondOr { .. }
         | Inst::TrapIf { .. }
         | Inst::TrapIfAnd { .. }
         | Inst::TrapIfOr { .. }
@@ -979,6 +980,8 @@ pub(crate) fn check(
         Inst::Unwind { .. } | Inst::DummyUse { .. } => Ok(()),
 
         Inst::StackSwitchBasic { .. } => Err(PccError::UnimplementedInst),
+
+        Inst::External { .. } => Ok(()), // TODO: unsure what to do about this!
     }
 }
 
