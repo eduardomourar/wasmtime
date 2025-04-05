@@ -1,6 +1,5 @@
-use super::GcCompiler;
+use super::{ArrayInit, GcCompiler};
 use crate::func_environ::{Extension, FuncEnvironment};
-use crate::gc::ArrayInit;
 use crate::translate::{StructFieldsVec, TargetEnvironment};
 use crate::TRAP_INTERNAL_ASSERT;
 use cranelift_codegen::{
@@ -22,7 +21,11 @@ mod drc;
 mod null;
 
 /// Get the default GC compiler.
-pub fn gc_compiler(func_env: &FuncEnvironment<'_>) -> WasmResult<Box<dyn GcCompiler>> {
+pub fn gc_compiler(func_env: &mut FuncEnvironment<'_>) -> WasmResult<Box<dyn GcCompiler>> {
+    // If this function requires a GC compiler, that is not too bad of an
+    // over-approximation for it requiring a GC heap.
+    func_env.needs_gc_heap = true;
+
     match func_env.tunables.collector {
         #[cfg(feature = "gc-drc")]
         Some(Collector::DeferredReferenceCounting) => Ok(Box::new(drc::DrcCompiler::default())),
@@ -637,7 +640,8 @@ pub fn translate_array_fill(
     );
 
     // Calculate the end address, just after the filled region.
-    let fill_size = uextend_i32_to_pointer_type(builder, func_env.pointer_type(), offset_in_elems);
+    let fill_size = builder.ins().imul(n, one_elem_size);
+    let fill_size = uextend_i32_to_pointer_type(builder, func_env.pointer_type(), fill_size);
     let fill_end = builder.ins().iadd(elem_addr, fill_size);
 
     let one_elem_size =
@@ -657,9 +661,9 @@ pub fn translate_array_fill(
                 .element_type;
             write_field_at_addr(func_env, builder, elem_ty, elem_addr, value)
         },
-    )?;
+    );
     log::trace!("translate_array_fill(..) -> {result:?}");
-    Ok(result)
+    result
 }
 
 pub fn translate_array_len(

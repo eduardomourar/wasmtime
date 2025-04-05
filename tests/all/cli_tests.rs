@@ -2383,3 +2383,55 @@ fn numeric_args() -> Result<()> {
     assert_eq!(output.stdout, b"42\n");
     Ok(())
 }
+
+#[test]
+fn compilation_logs() -> Result<()> {
+    let temp = tempfile::NamedTempFile::new()?;
+    let output = get_wasmtime_command()?
+        .args(&[
+            "compile",
+            "-Wgc",
+            "tests/all/cli_tests/issue-10353.wat",
+            "--output",
+            &temp.path().display().to_string(),
+        ])
+        .env("WASMTIME_LOG", "trace")
+        .env("RUST_BACKTRACE", "1")
+        .output()?;
+    if !output.status.success() {
+        println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        panic!("wasmtime compilation failed when logs requested");
+    }
+    Ok(())
+}
+
+#[test]
+fn big_table_in_pooling_allocator() -> Result<()> {
+    // Works by default
+    run_wasmtime(&["tests/all/cli_tests/big_table.wat"])?;
+
+    // Does not work by default in the pooling allocator, and the error message
+    // should mention something about the pooling allocator.
+    let output = run_wasmtime_for_output(
+        &["-Opooling-allocator", "tests/all/cli_tests/big_table.wat"],
+        None,
+    )?;
+    assert!(!output.status.success());
+    println!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pooling allocator"));
+
+    // Does work with `-Wmax-table-elements`
+    run_wasmtime(&[
+        "-Opooling-allocator",
+        "-Wmax-table-elements=25000",
+        "tests/all/cli_tests/big_table.wat",
+    ])?;
+    // Also works with `-Opooling-table-elements`
+    run_wasmtime(&[
+        "-Opooling-allocator",
+        "-Opooling-table-elements=25000",
+        "tests/all/cli_tests/big_table.wat",
+    ])?;
+    Ok(())
+}

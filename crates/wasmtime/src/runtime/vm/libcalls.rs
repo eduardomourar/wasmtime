@@ -270,7 +270,7 @@ unsafe fn table_fill_func_ref(
     match table.element_type() {
         TableElementType::Func => {
             let val = NonNull::new(val.cast::<VMFuncRef>());
-            table.fill(store.optional_gc_store_mut()?, dst, val.into(), len)?;
+            table.fill(store.optional_gc_store_mut(), dst, val.into(), len)?;
             Ok(())
         }
         TableElementType::GcRef => unreachable!(),
@@ -317,7 +317,7 @@ unsafe fn table_copy(
     // Lazy-initialize the whole range in the source table first.
     let src_range = src..(src.checked_add(len).unwrap_or(u64::MAX));
     let src_table = instance.get_table_with_lazy_init(src_table_index, src_range);
-    let gc_store = store.optional_gc_store_mut()?;
+    let gc_store = store.optional_gc_store_mut();
     Table::copy(gc_store, dst_table, src_table, dst, src, len)?;
     Ok(())
 }
@@ -509,7 +509,11 @@ unsafe fn gc_alloc_raw(
 
     let size = usize::try_from(size).unwrap();
     let align = usize::try_from(align).unwrap();
-    let layout = Layout::from_size_align(size, align).unwrap();
+    assert!(align.is_power_of_two());
+    let layout = Layout::from_size_align(size, align).map_err(|e| {
+        let err = Error::from(crate::Trap::AllocationTooLarge);
+        err.context(e)
+    })?;
 
     let gc_ref = match store
         .store_opaque_mut()

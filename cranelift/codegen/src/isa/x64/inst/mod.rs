@@ -56,7 +56,7 @@ pub struct ReturnCallInfo<T> {
 fn inst_size_test() {
     // This test will help with unintentionally growing the size
     // of the Inst enum.
-    assert_eq!(48, std::mem::size_of::<Inst>());
+    assert_eq!(56, std::mem::size_of::<Inst>());
 }
 
 pub(crate) fn low32_will_sign_extend_to_64(x: u64) -> bool {
@@ -74,7 +74,6 @@ impl Inst {
             // These instructions are part of SSE2, which is a basic requirement in Cranelift, and
             // don't have to be checked.
             Inst::AluRmiR { .. }
-            | Inst::AluRM { .. }
             | Inst::AtomicRmwSeq { .. }
             | Inst::Bswap { .. }
             | Inst::CallKnown { .. }
@@ -712,20 +711,6 @@ impl PrettyPrint for Inst {
                 let dst = pretty_print_reg(dst.to_reg().to_reg(), size_bytes);
                 let op = ljustify2(op.to_string(), suffix_lqb(*size));
                 format!("{op} {dst}, {dst}, {dst}")
-            }
-            Inst::AluRM {
-                size,
-                op,
-                src1_dst,
-                src2,
-                lock,
-            } => {
-                let size_bytes = size.to_bytes();
-                let src2 = pretty_print_reg(src2.to_reg(), size_bytes);
-                let src1_dst = src1_dst.pretty_print(size_bytes);
-                let op = ljustify2(op.to_string(), suffix_bwlq(*size));
-                let prefix = if *lock { "lock " } else { "" };
-                format!("{prefix}{op} {src2}, {src1_dst}")
             }
             Inst::AluRmRVex {
                 size,
@@ -2012,10 +1997,6 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             src2.get_operands(collector);
         }
         Inst::AluConstOp { dst, .. } => collector.reg_def(dst),
-        Inst::AluRM { src1_dst, src2, .. } => {
-            collector.reg_use(src2);
-            src1_dst.get_operands(collector);
-        }
         Inst::AluRmRVex {
             src1, src2, dst, ..
         } => {
@@ -2464,8 +2445,11 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.any_def(vreg),
+                }
             }
             collector.reg_clobbers(*clobbers);
         }
@@ -2491,8 +2475,11 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.any_def(vreg),
+                }
             }
             collector.reg_clobbers(*clobbers);
         }
