@@ -123,7 +123,7 @@ jobs:
   cargo_vet:
     name: Cargo vet
     needs: determine
-    if: needs.determine.outputs.audit
+    if: github.repository == 'bytecodealliance/wasmtime' && needs.determine.outputs.audit
     runs-on: ubuntu-latest
     outputs:
       outcome: ${{ steps.vet.outcome }}
@@ -768,6 +768,14 @@ jobs:
         ninja -C build install
         touch ${{ runner.tool_cache }}/qemu/built
       if: matrix.qemu != ''
+
+    - name: Configure ASAN
+      run: |
+        echo CARGO_PROFILE_DEV_OPT_LEVEL=2 >> $GITHUB_ENV
+        echo CARGO_PROFILE_TEST_OPT_LEVEL=2 >> $GITHUB_ENV
+        echo RUSTFLAGS=-Zsanitizer=address >> $GITHUB_ENV
+        echo RUSTDOCFLAGS=-Zsanitizer=address >> $GITHUB_ENV
+      if: ${{ contains(matrix.name, 'ASAN') }}
 
     # Record some CPU details; this is helpful information if tests fail due
     # to CPU-specific features.

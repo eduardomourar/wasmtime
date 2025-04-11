@@ -41,10 +41,12 @@ pub fn open_scratch_directory(path: &str) -> Result<wasip1::Fd, String> {
 }
 
 pub unsafe fn create_file(dir_fd: wasip1::Fd, filename: &str) {
-    let file_fd = wasip1::path_open(dir_fd, 0, filename, wasip1::OFLAGS_CREAT, 0, 0, 0)
-        .expect("creating a file");
-    assert!(file_fd > STDERR_FD, "file descriptor range check",);
-    wasip1::fd_close(file_fd).expect("closing a file");
+    unsafe {
+        let file_fd = wasip1::path_open(dir_fd, 0, filename, wasip1::OFLAGS_CREAT, 0, 0, 0)
+            .expect("creating a file");
+        assert!(file_fd > STDERR_FD, "file descriptor range check",);
+        wasip1::fd_close(file_fd).expect("closing a file");
+    }
 }
 
 // Small workaround to get the crate's macros, through the
@@ -129,6 +131,7 @@ pub struct TestConfig {
     fs_time_precision: u64,
     no_dangling_filesystem: bool,
     no_rename_dir_to_empty_dir: bool,
+    rename_dir_onto_file: bool,
 }
 
 enum ErrnoMode {
@@ -160,6 +163,7 @@ impl TestConfig {
             fs_time_precision,
             no_dangling_filesystem,
             no_rename_dir_to_empty_dir,
+            rename_dir_onto_file: std::env::var("RENAME_DIR_ONTO_FILE").is_ok(),
         }
     }
     pub fn errno_expect_unix(&self) -> bool {
@@ -188,5 +192,8 @@ impl TestConfig {
     }
     pub fn support_rename_dir_to_empty_dir(&self) -> bool {
         !self.no_rename_dir_to_empty_dir
+    }
+    pub fn support_rename_dir_onto_file(&self) -> bool {
+        self.rename_dir_onto_file
     }
 }

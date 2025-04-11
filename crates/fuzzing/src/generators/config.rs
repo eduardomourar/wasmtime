@@ -131,6 +131,7 @@ impl Config {
             custom_page_sizes,
             multi_memory,
             threads,
+            shared_everything_threads,
             gc,
             function_references,
             relaxed_simd,
@@ -139,7 +140,11 @@ impl Config {
             extended_const,
             wide_arithmetic,
             component_model_async,
+            component_model_async_builtins,
+            component_model_async_stackful,
             simd,
+            exceptions,
+            legacy_exceptions,
 
             hogs_memory: _,
             nan_canonicalization: _,
@@ -151,6 +156,11 @@ impl Config {
         self.module_config.function_references_enabled =
             function_references.or(gc).unwrap_or(false);
         self.module_config.component_model_async = component_model_async.unwrap_or(false);
+        self.module_config.component_model_async_builtins =
+            component_model_async_builtins.unwrap_or(false);
+        self.module_config.component_model_async_stackful =
+            component_model_async_stackful.unwrap_or(false);
+        self.module_config.legacy_exceptions = legacy_exceptions.unwrap_or(false);
 
         // Enable/disable proposals that wasm-smith has knobs for which will be
         // read when creating `wasmtime::Config`.
@@ -164,11 +174,13 @@ impl Config {
         config.tail_call_enabled = tail_call.unwrap_or(false);
         config.custom_page_sizes_enabled = custom_page_sizes.unwrap_or(false);
         config.threads_enabled = threads.unwrap_or(false);
+        config.shared_everything_threads_enabled = shared_everything_threads.unwrap_or(false);
         config.gc_enabled = gc.unwrap_or(false);
         config.reference_types_enabled = config.gc_enabled
             || self.module_config.function_references_enabled
             || reference_types.unwrap_or(false);
         config.extended_const_enabled = extended_const.unwrap_or(false);
+        config.exceptions_enabled = exceptions.unwrap_or(false);
         if multi_memory.unwrap_or(false) {
             config.max_memories = limits::MEMORIES_PER_MODULE as usize;
         } else {
@@ -269,6 +281,10 @@ impl Config {
         cfg.wasm.async_stack_zeroing = Some(self.wasmtime.async_stack_zeroing);
         cfg.wasm.bulk_memory = Some(true);
         cfg.wasm.component_model_async = Some(self.module_config.component_model_async);
+        cfg.wasm.component_model_async_builtins =
+            Some(self.module_config.component_model_async_builtins);
+        cfg.wasm.component_model_async_stackful =
+            Some(self.module_config.component_model_async_stackful);
         cfg.wasm.custom_page_sizes = Some(self.module_config.config.custom_page_sizes_enabled);
         cfg.wasm.epoch_interruption = Some(self.wasmtime.epoch_interruption);
         cfg.wasm.extended_const = Some(self.module_config.config.extended_const_enabled);
@@ -283,7 +299,11 @@ impl Config {
         cfg.wasm.simd = Some(self.module_config.config.simd_enabled);
         cfg.wasm.tail_call = Some(self.module_config.config.tail_call_enabled);
         cfg.wasm.threads = Some(self.module_config.config.threads_enabled);
+        cfg.wasm.shared_everything_threads =
+            Some(self.module_config.config.shared_everything_threads_enabled);
         cfg.wasm.wide_arithmetic = Some(self.module_config.config.wide_arithmetic_enabled);
+        cfg.wasm.exceptions = Some(self.module_config.config.exceptions_enabled);
+        cfg.wasm.legacy_exceptions = Some(self.module_config.legacy_exceptions);
         if !self.module_config.config.simd_enabled {
             cfg.wasm.relaxed_simd = Some(false);
         }
@@ -837,7 +857,13 @@ impl RegallocAlgorithm {
     fn to_wasmtime(&self) -> wasmtime::RegallocAlgorithm {
         match self {
             RegallocAlgorithm::Backtracking => wasmtime::RegallocAlgorithm::Backtracking,
-            RegallocAlgorithm::SinglePass => wasmtime::RegallocAlgorithm::SinglePass,
+            // Note: we have disabled `single_pass` for now because of
+            // its limitations w.r.t. exception handling
+            // (https://github.com/bytecodealliance/regalloc2/issues/217). To
+            // avoid breaking all existing fuzzbugs by changing the
+            // `arbitrary` mappings, we keep the `RegallocAlgorithm`
+            // enum as it is and remap here to `Backtracking`.
+            RegallocAlgorithm::SinglePass => wasmtime::RegallocAlgorithm::Backtracking,
         }
     }
 }

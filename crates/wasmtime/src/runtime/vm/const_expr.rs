@@ -73,7 +73,7 @@ impl<'a> ConstEvalContext<'a> {
             .collect::<Vec<_>>();
 
         let allocator = StructRefPre::_new(store, struct_ty);
-        let struct_ref = StructRef::_new(store, &allocator, &fields)?;
+        let struct_ref = unsafe { StructRef::new_maybe_async(store, &allocator, &fields)? };
         let raw = struct_ref.to_anyref()._to_raw(store)?;
         Ok(ValRaw::anyref(raw))
     }
@@ -136,11 +136,16 @@ impl ConstExprEvaluator {
     ///
     /// # Unsafety
     ///
+    /// When async is enabled, this may only be executed on a fiber stack.
+    ///
     /// The given const expression must be valid within the given context,
     /// e.g. the const expression must be well-typed and the context must return
     /// global values of the expected types. This evaluator operates directly on
     /// untyped `ValRaw`s and does not and cannot check that its operands are of
     /// the correct type.
+    ///
+    /// If given async store, then this must be called from on an async fiber
+    /// stack.
     pub unsafe fn eval(
         &mut self,
         store: &mut StoreOpaque,
@@ -269,7 +274,7 @@ impl ConstExprEvaluator {
                     let elem = Val::_from_raw(&mut store, self.pop()?, ty.element_type().unpack());
 
                     let pre = ArrayRefPre::_new(&mut store, ty);
-                    let array = ArrayRef::_new(&mut store, &pre, &elem, len)?;
+                    let array = unsafe { ArrayRef::new_maybe_async(&mut store, &pre, &elem, len)? };
 
                     self.stack
                         .push(ValRaw::anyref(array.to_anyref()._to_raw(&mut store)?));
@@ -288,7 +293,7 @@ impl ConstExprEvaluator {
                         .expect("type should have a default value");
 
                     let pre = ArrayRefPre::_new(&mut store, ty);
-                    let array = ArrayRef::_new(&mut store, &pre, &elem, len)?;
+                    let array = unsafe { ArrayRef::new_maybe_async(&mut store, &pre, &elem, len)? };
 
                     self.stack
                         .push(ValRaw::anyref(array.to_anyref()._to_raw(&mut store)?));
@@ -323,7 +328,8 @@ impl ConstExprEvaluator {
                         .collect::<SmallVec<[_; 8]>>();
 
                     let pre = ArrayRefPre::_new(&mut store, ty);
-                    let array = ArrayRef::_new_fixed(&mut store, &pre, &elems)?;
+                    let array =
+                        unsafe { ArrayRef::new_fixed_maybe_async(&mut store, &pre, &elems)? };
 
                     self.stack
                         .push(ValRaw::anyref(array.to_anyref()._to_raw(&mut store)?));

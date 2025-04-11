@@ -332,7 +332,7 @@ fn compile_module(
                 // when arbitrary table element limits have been exceeded as
                 // there is currently no way to constrain the generated module
                 // table types.
-                let string = e.to_string();
+                let string = format!("{e:?}");
                 if string.contains("minimum element size") {
                     return None;
                 }
@@ -680,7 +680,11 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
                 let nth = nth % funcs.len();
                 let f = &funcs[nth];
                 let ty = f.ty(&store);
-                if let Ok(params) = dummy::dummy_values(ty.params()) {
+                if let Some(params) = ty
+                    .params()
+                    .map(|p| p.default_value())
+                    .collect::<Option<Vec<_>>>()
+                {
                     let mut results = vec![Val::I32(0); ty.results().len()];
                     let _ = f.call(store, &params, &mut results);
                 }
@@ -805,7 +809,7 @@ pub fn table_ops(
             move |mut caller: Caller<'_, StoreLimits>, _params, results| {
                 log::info!("table_ops: GC");
                 if num_gcs.fetch_add(1, SeqCst) < MAX_GCS {
-                    caller.gc();
+                    caller.gc(None);
                 }
 
                 let a = ExternRef::new(&mut caller, CountDrops(num_dropped.clone()))?;
@@ -934,7 +938,7 @@ pub fn table_ops(
         }
 
         // Do a final GC after running the Wasm.
-        store.gc();
+        store.gc(None);
     }
 
     assert_eq!(num_dropped.load(SeqCst), expected_drops.load(SeqCst));
@@ -1129,17 +1133,17 @@ pub fn call_async(wasm: &[u8], config: &generators::Config, mut poll_amts: &[u32
                         log::info!("yielding {} times in import", poll_amt);
                         YieldN(poll_amt).await;
                         for (ret_ty, result) in ty.results().zip(results) {
-                            *result = dummy::dummy_value(ret_ty)?;
+                            *result = ret_ty.default_value().unwrap();
                         }
                         Ok(())
                     })
                 })
                 .into()
             }
-            other_ty => match dummy::dummy_extern(&mut store, other_ty) {
-                Ok(item) => item,
-                Err(e) => {
-                    log::warn!("couldn't create import: {}", e);
+            other_ty => match other_ty.default_value(&mut store) {
+                Some(item) => item,
+                None => {
+                    log::warn!("couldn't create import for {import:?}");
                     return;
                 }
             },
@@ -1187,11 +1191,11 @@ pub fn call_async(wasm: &[u8], config: &generators::Config, mut poll_amts: &[u32
         let ty = func.ty(&store);
         let params = ty
             .params()
-            .map(|ty| dummy::dummy_value(ty).unwrap())
+            .map(|ty| ty.default_value().unwrap())
             .collect::<Vec<_>>();
         let mut results = ty
             .results()
-            .map(|ty| dummy::dummy_value(ty).unwrap())
+            .map(|ty| ty.default_value().unwrap())
             .collect::<Vec<_>>();
 
         log::info!("invoking export {:?}", name);

@@ -175,6 +175,7 @@ macro_rules! id {
 id! {
     pub struct InstanceId(u32);
     pub struct MemoryId(u32);
+    pub struct TableId(u32);
     pub struct ReallocId(u32);
     pub struct CallbackId(u32);
     pub struct AdapterId(u32);
@@ -320,7 +321,6 @@ pub enum Trampoline {
     },
     StreamRead {
         ty: TypeStreamTableIndex,
-        err_ctx_ty: TypeComponentLocalErrorContextTableIndex,
         options: CanonicalOptions,
     },
     StreamWrite {
@@ -340,14 +340,12 @@ pub enum Trampoline {
     },
     StreamCloseWritable {
         ty: TypeStreamTableIndex,
-        err_ctx_ty: TypeComponentLocalErrorContextTableIndex,
     },
     FutureNew {
         ty: TypeFutureTableIndex,
     },
     FutureRead {
         ty: TypeFutureTableIndex,
-        err_ctx_ty: TypeComponentLocalErrorContextTableIndex,
         options: CanonicalOptions,
     },
     FutureWrite {
@@ -367,7 +365,6 @@ pub enum Trampoline {
     },
     FutureCloseWritable {
         ty: TypeFutureTableIndex,
-        err_ctx_ty: TypeComponentLocalErrorContextTableIndex,
     },
     ErrorContextNew {
         ty: TypeComponentLocalErrorContextTableIndex,
@@ -497,6 +494,7 @@ impl ComponentDfg {
             dfg: &self,
             initializers: Vec::new(),
             runtime_memories: Default::default(),
+            runtime_tables: Default::default(),
             runtime_post_return: Default::default(),
             runtime_reallocs: Default::default(),
             runtime_callbacks: Default::default(),
@@ -538,6 +536,7 @@ impl ComponentDfg {
                 num_lowerings: linearize.num_lowerings,
 
                 num_runtime_memories: linearize.runtime_memories.len() as u32,
+                num_runtime_tables: linearize.runtime_tables.len() as u32,
                 num_runtime_post_returns: linearize.runtime_post_return.len() as u32,
                 num_runtime_reallocs: linearize.runtime_reallocs.len() as u32,
                 num_runtime_callbacks: linearize.runtime_callbacks.len() as u32,
@@ -574,6 +573,7 @@ struct LinearizeDfg<'a> {
     trampoline_defs: PrimaryMap<TrampolineIndex, info::Trampoline>,
     trampoline_map: HashMap<TrampolineIndex, TrampolineIndex>,
     runtime_memories: HashMap<MemoryId, RuntimeMemoryIndex>,
+    runtime_tables: HashMap<TableId, RuntimeTableIndex>,
     runtime_reallocs: HashMap<ReallocId, RuntimeReallocIndex>,
     runtime_callbacks: HashMap<CallbackId, RuntimeCallbackIndex>,
     runtime_post_return: HashMap<PostReturnId, RuntimePostReturnIndex>,
@@ -821,13 +821,8 @@ impl LinearizeDfg<'_> {
                 instance: *instance,
             },
             Trampoline::StreamNew { ty } => info::Trampoline::StreamNew { ty: *ty },
-            Trampoline::StreamRead {
-                ty,
-                err_ctx_ty,
-                options,
-            } => info::Trampoline::StreamRead {
+            Trampoline::StreamRead { ty, options } => info::Trampoline::StreamRead {
                 ty: *ty,
-                err_ctx_ty: *err_ctx_ty,
                 options: self.options(options),
             },
             Trampoline::StreamWrite { ty, options } => info::Trampoline::StreamWrite {
@@ -845,20 +840,12 @@ impl LinearizeDfg<'_> {
             Trampoline::StreamCloseReadable { ty } => {
                 info::Trampoline::StreamCloseReadable { ty: *ty }
             }
-            Trampoline::StreamCloseWritable { ty, err_ctx_ty } => {
-                info::Trampoline::StreamCloseWritable {
-                    ty: *ty,
-                    err_ctx_ty: *err_ctx_ty,
-                }
+            Trampoline::StreamCloseWritable { ty } => {
+                info::Trampoline::StreamCloseWritable { ty: *ty }
             }
             Trampoline::FutureNew { ty } => info::Trampoline::FutureNew { ty: *ty },
-            Trampoline::FutureRead {
-                ty,
-                err_ctx_ty,
-                options,
-            } => info::Trampoline::FutureRead {
+            Trampoline::FutureRead { ty, options } => info::Trampoline::FutureRead {
                 ty: *ty,
-                err_ctx_ty: *err_ctx_ty,
                 options: self.options(options),
             },
             Trampoline::FutureWrite { ty, options } => info::Trampoline::FutureWrite {
@@ -876,11 +863,8 @@ impl LinearizeDfg<'_> {
             Trampoline::FutureCloseReadable { ty } => {
                 info::Trampoline::FutureCloseReadable { ty: *ty }
             }
-            Trampoline::FutureCloseWritable { ty, err_ctx_ty } => {
-                info::Trampoline::FutureCloseWritable {
-                    ty: *ty,
-                    err_ctx_ty: *err_ctx_ty,
-                }
+            Trampoline::FutureCloseWritable { ty } => {
+                info::Trampoline::FutureCloseWritable { ty: *ty }
             }
             Trampoline::ErrorContextNew { ty, options } => info::Trampoline::ErrorContextNew {
                 ty: *ty,
