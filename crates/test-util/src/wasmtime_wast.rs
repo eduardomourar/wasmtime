@@ -29,6 +29,7 @@ pub fn apply_test_config(config: &mut Config, test_config: &wast::TestConfig) {
         custom_page_sizes,
         multi_memory,
         threads,
+        shared_everything_threads,
         gc,
         function_references,
         relaxed_simd,
@@ -37,8 +38,12 @@ pub fn apply_test_config(config: &mut Config, test_config: &wast::TestConfig) {
         extended_const,
         wide_arithmetic,
         component_model_async,
+        component_model_async_builtins,
+        component_model_async_stackful,
         nan_canonicalization,
         simd,
+        exceptions,
+        legacy_exceptions,
 
         hogs_memory: _,
         gc_types: _,
@@ -50,13 +55,18 @@ pub fn apply_test_config(config: &mut Config, test_config: &wast::TestConfig) {
     let custom_page_sizes = custom_page_sizes.unwrap_or(false);
     let multi_memory = multi_memory.unwrap_or(false);
     let threads = threads.unwrap_or(false);
+    let shared_everything_threads = shared_everything_threads.unwrap_or(false);
     let gc = gc.unwrap_or(false);
     let tail_call = tail_call.unwrap_or(false);
     let extended_const = extended_const.unwrap_or(false);
     let wide_arithmetic = wide_arithmetic.unwrap_or(false);
     let component_model_async = component_model_async.unwrap_or(false);
+    let component_model_async_builtins = component_model_async_builtins.unwrap_or(false);
+    let component_model_async_stackful = component_model_async_stackful.unwrap_or(false);
     let nan_canonicalization = nan_canonicalization.unwrap_or(false);
     let relaxed_simd = relaxed_simd.unwrap_or(false);
+    let exceptions = exceptions.unwrap_or(false);
+    let legacy_exceptions = legacy_exceptions.unwrap_or(false);
 
     // Some proposals in wasm depend on previous proposals. For example the gc
     // proposal depends on function-references which depends on reference-types.
@@ -70,6 +80,7 @@ pub fn apply_test_config(config: &mut Config, test_config: &wast::TestConfig) {
     config
         .wasm_multi_memory(multi_memory)
         .wasm_threads(threads)
+        .wasm_shared_everything_threads(shared_everything_threads)
         .wasm_memory64(memory64)
         .wasm_function_references(function_references)
         .wasm_gc(gc)
@@ -81,5 +92,10 @@ pub fn apply_test_config(config: &mut Config, test_config: &wast::TestConfig) {
         .wasm_extended_const(extended_const)
         .wasm_wide_arithmetic(wide_arithmetic)
         .wasm_component_model_async(component_model_async)
+        .wasm_component_model_async_builtins(component_model_async_builtins)
+        .wasm_component_model_async_stackful(component_model_async_stackful)
+        .wasm_exceptions(exceptions)
         .cranelift_nan_canonicalization(nan_canonicalization);
+    #[expect(deprecated, reason = "forwarding legacy-exceptions")]
+    config.wasm_legacy_exceptions(legacy_exceptions);
 }

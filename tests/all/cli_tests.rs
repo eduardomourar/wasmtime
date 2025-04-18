@@ -857,7 +857,10 @@ fn run_precompiled_component() -> Result<()> {
     Ok(())
 }
 
+// Disable test on s390x because the large allocation may actually succeed;
+// the whole 64-bit address space is available on this platform.
 #[test]
+#[cfg(not(target_arch = "s390x"))]
 fn memory_growth_failure() -> Result<()> {
     let output = get_wasmtime_command()?
         .args(&[
@@ -1116,14 +1119,7 @@ mod test_programs {
 
     #[test]
     fn cli_hello_stdout() -> Result<()> {
-        run_wasmtime(&[
-            "run",
-            "-Wcomponent-model",
-            CLI_HELLO_STDOUT_COMPONENT,
-            "gussie",
-            "sparky",
-            "willa",
-        ])?;
+        run_wasmtime(&["run", "-Wcomponent-model", CLI_HELLO_STDOUT_COMPONENT])?;
         Ok(())
     }
 
@@ -2117,6 +2113,26 @@ after empty
     async fn cli_serve_trap_before_set() -> Result<()> {
         cli_serve_guest_never_invoked_set(CLI_SERVE_TRAP_BEFORE_SET_COMPONENT).await
     }
+
+    mod invoke {
+        use super::*;
+
+        #[test]
+        fn cli_hello_stdout() -> Result<()> {
+            println!("{CLI_HELLO_STDOUT_COMPONENT}");
+            let output = run_wasmtime(&[
+                "run",
+                "-Wcomponent-model",
+                "--invoke",
+                "run()",
+                CLI_HELLO_STDOUT_COMPONENT,
+            ])?;
+            // First this component prints "hello, world", then the invoke
+            // result is printed as "ok".
+            assert_eq!(output, "hello, world\nok\n");
+            Ok(())
+        }
+    }
 }
 
 #[test]
@@ -2197,14 +2213,10 @@ fn config_cli_flag() -> Result<()> {
         br#"
         [optimize]
         opt-level = 2
-        regalloc-algorithm = "single-pass"
         signals-based-traps = false
 
         [codegen]
         collector = "null"
-
-        [debug]
-        debug-info = true
 
         [wasm]
         max-wasm-stack = 65536
@@ -2381,5 +2393,57 @@ fn numeric_args() -> Result<()> {
     )?;
     assert_eq!(output.status.success(), true);
     assert_eq!(output.stdout, b"42\n");
+    Ok(())
+}
+
+#[test]
+fn compilation_logs() -> Result<()> {
+    let temp = tempfile::NamedTempFile::new()?;
+    let output = get_wasmtime_command()?
+        .args(&[
+            "compile",
+            "-Wgc",
+            "tests/all/cli_tests/issue-10353.wat",
+            "--output",
+            &temp.path().display().to_string(),
+        ])
+        .env("WASMTIME_LOG", "trace")
+        .env("RUST_BACKTRACE", "1")
+        .output()?;
+    if !output.status.success() {
+        println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+        println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+        panic!("wasmtime compilation failed when logs requested");
+    }
+    Ok(())
+}
+
+#[test]
+fn big_table_in_pooling_allocator() -> Result<()> {
+    // Works by default
+    run_wasmtime(&["tests/all/cli_tests/big_table.wat"])?;
+
+    // Does not work by default in the pooling allocator, and the error message
+    // should mention something about the pooling allocator.
+    let output = run_wasmtime_for_output(
+        &["-Opooling-allocator", "tests/all/cli_tests/big_table.wat"],
+        None,
+    )?;
+    assert!(!output.status.success());
+    println!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pooling allocator"));
+
+    // Does work with `-Wmax-table-elements`
+    run_wasmtime(&[
+        "-Opooling-allocator",
+        "-Wmax-table-elements=25000",
+        "tests/all/cli_tests/big_table.wat",
+    ])?;
+    // Also works with `-Opooling-table-elements`
+    run_wasmtime(&[
+        "-Opooling-allocator",
+        "-Opooling-table-elements=25000",
+        "tests/all/cli_tests/big_table.wat",
+    ])?;
     Ok(())
 }

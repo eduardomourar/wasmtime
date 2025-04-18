@@ -67,21 +67,14 @@ pub struct SideEffects {
     /// This field signals if it is the case and return the `Block` to which the initialization has
     /// been added.
     pub instructions_added_to_blocks: Vec<Block>,
-
-    /// When a variable does not have a single, dominating definition of a use,
-    /// we must insert block parameters to control-flow join points. This field
-    /// contains all of the block parameters we inserted, along with the
-    /// variable that they are associated with.
-    pub params_added_to_blocks: Vec<(Value, Variable)>,
 }
 
 impl SideEffects {
     fn is_empty(&self) -> bool {
         let Self {
             instructions_added_to_blocks,
-            params_added_to_blocks,
         } = self;
-        instructions_added_to_blocks.is_empty() && params_added_to_blocks.is_empty()
+        instructions_added_to_blocks.is_empty()
     }
 }
 
@@ -195,6 +188,12 @@ fn emit_zero(ty: Type, mut cur: FuncCursor) -> Value {
 /// Phi functions.
 ///
 impl SSABuilder {
+    /// Get all of the values associated with the given variable that we have
+    /// inserted in the function thus far.
+    pub fn values_for_var(&self, var: Variable) -> impl Iterator<Item = Value> + '_ {
+        self.variables[var].values().filter_map(|v| v.expand())
+    }
+
     /// Declares a new definition of a variable in a given basic block.
     /// The SSA value is passed as an argument because it should be created with
     /// `ir::DataFlowGraph::append_result`.
@@ -318,7 +317,6 @@ impl SSABuilder {
         // find a usable definition. So create one.
         let val = func.dfg.append_block_param(block, ty);
         var_defs[block] = PackedOption::from(val);
-        self.side_effects.params_added_to_blocks.push((val, var));
 
         // Now every predecessor needs to pass its definition of this variable to the newly added
         // block parameter. To do that we have to "recursively" call `use_var`, but there are two
@@ -553,7 +551,8 @@ impl SSABuilder {
                 let pred = preds.get_mut(idx, &mut self.inst_pool).unwrap();
                 let branch = *pred;
 
-                let dests = dfg.insts[branch].branch_destination_mut(&mut dfg.jump_tables);
+                let dests = dfg.insts[branch]
+                    .branch_destination_mut(&mut dfg.jump_tables, &mut dfg.exception_tables);
                 assert!(
                     !dests.is_empty(),
                     "you have declared a non-branch instruction as a predecessor to a block!"
@@ -770,9 +769,9 @@ mod tests {
                 ..
             } => {
                 assert_eq!(block_then.block(&func.dfg.value_lists), block2);
-                assert_eq!(block_then.args_slice(&func.dfg.value_lists).len(), 0);
+                assert_eq!(block_then.args(&func.dfg.value_lists).len(), 0);
                 assert_eq!(block_else.block(&func.dfg.value_lists), block1);
-                assert_eq!(block_else.args_slice(&func.dfg.value_lists).len(), 0);
+                assert_eq!(block_else.args(&func.dfg.value_lists).len(), 0);
             }
             _ => assert!(false),
         };
@@ -782,9 +781,9 @@ mod tests {
                 ..
             } => {
                 assert_eq!(block_then.block(&func.dfg.value_lists), block2);
-                assert_eq!(block_then.args_slice(&func.dfg.value_lists).len(), 0);
+                assert_eq!(block_then.args(&func.dfg.value_lists).len(), 0);
                 assert_eq!(block_else.block(&func.dfg.value_lists), block1);
-                assert_eq!(block_else.args_slice(&func.dfg.value_lists).len(), 0);
+                assert_eq!(block_else.args(&func.dfg.value_lists).len(), 0);
             }
             _ => assert!(false),
         };
@@ -793,7 +792,7 @@ mod tests {
                 destination: dest, ..
             } => {
                 assert_eq!(dest.block(&func.dfg.value_lists), block2);
-                assert_eq!(dest.args_slice(&func.dfg.value_lists).len(), 0);
+                assert_eq!(dest.args(&func.dfg.value_lists).len(), 0);
             }
             _ => assert!(false),
         };
